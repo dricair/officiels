@@ -9,8 +9,12 @@
 """
 
 from bs4 import BeautifulSoup
+from openpyxl import Workbook
 import requests
-import xlrd
+
+import logging
+log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG)
 
 jury_url = "http://ffn.extranat.fr/webffn/resultats.php?idact=nat&idcpt={competition}&go=off"
 clubs_url = "http://ffn.extranat.fr/webffn/resultats.php?idact=nat&idcpt={competition}&go=clb"
@@ -19,19 +23,71 @@ clubs_url = "http://ffn.extranat.fr/webffn/resultats.php?idact=nat&idcpt={compet
 Represent a competition, composed of several Reunions
 """
 class Competition:
-    def __init__(self, index, titre, type, date):
-        self.index = index
-        self.titre = titre
-        self.type = type
-        self.date = date
-        self.reunions = []
-        self.participations = {}
+    def __init__(self, conf, competition_index):
+        """
+        :param conf: Configuration structure
+        :type Configuration
+        :param competition_index: Index of the competition
+        :type int
+        """
+        self.index = competition_index
+        url = jury_url.format(competition=competition_index)
+        log.debug("Jury et réunions: " + url)
+        data = requests.get(url).text
+        soup = BeautifulSoup(data, 'html.parser')
+
+        entete = soup.find("fieldset", class_="enteteCompetition")
+        spans = entete.find_all("span")
+        self.type, self.titre, self.date = spans[0].text, spans[1].text, entete.text.splitlines()[-1]
+        log.debug("{} - {} - {} ".format(self.type, self.titre, self.date))
 
         self.per_equipe = False
         self.regionale = False
 
+        self.reunions = []
+        self.participations = {}
+        table = entete.find_next_sibling("table")
+
+        for tr in table.find_all("tr"):
+            tds = tr.find_all("td")
+            if tds[0]['id'] == "mainResEpr":
+                reunion = Reunion(titre=tds[0].text)
+                self.reunions.append(reunion)
+                log.debug("Réunion trouvée: " + str(reunion))
+            else:
+                if len(tds) != 3:
+                    log.fatal("Besoin de 3 colonnes par officiel: " + tds.text)
+                if not reunion:
+                    log.fatal("Pas d'entête de réunion trouvé: " + tds.text)
+                nom, club = tds[1].text, tds[2].text
+                if club in conf.clubs:
+                    reunion.officiels.append(conf.findOfficiel(nom=nom, club=club))
+                    poste = tds[1].text, tds[0].text.replace(":", "").strip()
+                else:
+                    log.warning("Officiel ignoré: {} car le club {} n'est pas dans la liste".format(nom, club))
+
+        # Parse participations
+        url = clubs_url.format(competition=competition_index)
+        data = requests.get(url).text
+
+        soup = BeautifulSoup(data, 'html.parser')
+
+        table = soup.find("table", class_="tableau")
+        for tr in table.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) == 13:
+                tds[1].b.clear()
+                club, num = tds[1].a.text.strip(), int(tds[4].text)
+                if club in conf.clubs:
+                    self.participations[club] = num
+                else:
+                    log.warning("Club {} ignoré pour les participations car pas dans la liste".format(club))
+
+
     def __str__(self):
         return "{titre}\n{type}\n{date}\n\n".format(**self.__dict__) + "\n\n".join(map(str, self.reunions))
+
+
 
 """
 Represent a Reunion, base for the calculation
@@ -49,7 +105,6 @@ class Reunion:
         """
         Sort officiels per club
         """
-
         if self.officiels_per_club:
             return self.officiels_per_club
 
@@ -86,15 +141,82 @@ class Club:
     def __str__(self):
         return "{} ({})".format(self.nom, self.departement)
 
+
 """
 Global configuration
 """
 class Configuration:
-    def __init__(self):
+    def __init__(self, filename):
         self.officiels = {}
         self.clubs = {}
         self.postes = {}
-        self.xl_workbook = None
+        self.dirty = False
+
+        self.xl_workbook = xlrd.open_workbook(filename)
+        sheet_names = self.xl_workbook.sheet_names()
+        log.info("Configuration depuis le fichier '{}:".format(filename))
+
+        sheets = {'clubs': 'Clubs', 'officiels': 'Officiels', 'postes': 'Postes'}
+        if len(set(self.xl_workbook.sheet_names()) & set(sheets.values())) != 3:
+            raise Exception("Le fichier {} doit contenir les pages {} (Trouvées: {})".format(
+                filename, ', '.join(sheets.values()), ', '.join(self.xl_workbook.sheet_names())))
+
+        log.info("- Lecture des clubs")
+        xl_sheet = self.xl_workbook.sheet_by_name(sheets['clubs'])
+        row = xl_sheet.row(0)
+        if row[0].value != "Club" or row[1].value != "Département":
+            raise Exception("La page 'Clubs' doit contenir des colonnes 'Club' et 'Département' (Trouvées: {})".format(
+                ", ".join([cell.value for cell in row])))
+        for row_idx in range(1,xl_sheet.nrows):
+            row = xl_sheet.row(row_idx)
+            if row[0].value != "":
+                club = Club(nom=row[0].value, departement=row[1].value)
+                self.clubs[club.nom] = club
+
+        log.info("- Lecture des officiels")
+        xl_sheet = self.xl_workbook.sheet_by_name(sheets['officiels'])
+        row = xl_sheet.row(0)
+        if row[0].value != "Nom" or row[1].value != "Club" or row[2].value != "A depuis" or row[3].value != "B depuis":
+            raise Exception("La page 'Officiels' doit contenir des colonnes 'Nom', 'Club', 'A depuis' et 'B depuis' "
+                            "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
+        for row_idx in range(1,xl_sheet.nrows):
+            row = xl_sheet.row(row_idx)
+            if row[0].value != "":
+                club = row[1].value
+                if club not in self.clubs:
+                    print("WARNING: Le club {} pour l'officiel {} n'a pas été trouvé".format(club, row[0].value))
+                else:
+                    club = self.clubs[club]
+                    officiel = Officiel(nom=row[0].value, club=club, b_depuis=row[2].value)
+                    self.officiels[officiel.nom] = officiel
+
+        log.info("- Lecture des postes")
+        xl_sheet = self.xl_workbook.sheet_by_name(sheets['postes'])
+        row = xl_sheet.row(0)
+        if row[0].value != "Poste" or row[1].value != "Niveau":
+            raise Exception("La page 'Postes' doit contenir des colonnes 'Postes' et 'Niveau' "
+                            "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
+        for row_idx in range(1,xl_sheet.nrows):
+            row = xl_sheet.row(row_idx)
+            if row[0].value != "":
+                self.postes[row[0].value] = row[1].value
+
+
+    def findOfficiel(self, nom, club):
+        """
+        Find an officiel by name if it exists
+        """
+        if not nom in self.officiels:
+            log.warning("L'officiel {} (Club {}) n'existe pas".format(nom, club))
+            officiel = Officiel(nom, club)
+            self.officiels[nom] = officiel
+            sheet = self.xl_workbook.sheet_by_name(sheets['officiels'])
+
+
+
+        return self.officiels[nom]
+
+
 
 
 def points(competition, reunion, club):
@@ -113,125 +235,13 @@ def points(competition, reunion, club):
     officiels = reunion.officielsPerClub().get(club, [])
 
 
-def parseJury(competition_index):
-    """
-    :param competition_index: Index of the competition
-    :type int
-    :return: Competition with Jury
-    :rtype: Competition
-    """
-    url = jury_url.format(competition=competition_index)
-    data = requests.get(url).text
-
-    soup = BeautifulSoup(data, 'html.parser')
-
-    entete = soup.find("fieldset", class_="enteteCompetition")
-    spans = entete.find_all("span")
-    competition = Competition(index=competition_index, titre=spans[0].text, type=spans[1].text, date=entete.text.splitlines()[-1])
-
-    reunions = []
-    table = entete.find_next_sibling("table")
-
-    for tr in table.find_all("tr"):
-        tds = tr.find_all("td")
-        if tds[0]['id'] == "mainResEpr":
-            reunion = Reunion(titre=tds[0].text)
-            competition.reunions.append(reunion)
-        else:
-            if len(tds) != 3:
-                raise Exception("Besoin de 3 colonnes par officiel: " + tds.text)
-            if not reunion:
-                raise Exception("Pas d'entête de réunion trouvé: " + tds.text)
-            reunion.officiels.append(Officiel(nom=tds[1].text, club=tds[2].text))
-
-            poste = tds[0].text.replace(":", "").strip()
-
-    return competition
-
-def parseParticipations(competition):
-    url = clubs_url.format(competition=competition.index)
-    data = requests.get(url).text
-
-    soup = BeautifulSoup(data, 'html.parser')
-
-    table = soup.find("table", class_="tableau")
-    for tr in table.find_all("tr"):
-        tds = tr.find_all("td")
-        if len(tds) == 13:
-            tds[1].b.clear()
-            competition.participations[tds[1].a.text.strip()] = int(tds[4].text)
-
-
-
-def getConfiguration(filename):
-    conf = Configuration()
-    conf.xl_workbook = xlrd.open_workbook(filename)
-    sheet_names = conf.xl_workbook.sheet_names()
-    print("Configuration depuis le fichier '{}:".format(filename))
-
-    sheets = {'clubs': 'Clubs', 'officiels': 'Officiels', 'postes': 'Postes'}
-    if len(set(conf.xl_workbook.sheet_names()) & set(sheets.values())) != 3:
-        raise Exception("Le fichier {} doit contenir les pages {} (Trouvées: {})".format(
-            filename, ', '.join(sheets.values()), ', '.join(conf.xl_workbook.sheet_names())))
-
-    print("- Lecture des clubs")
-    xl_sheet = conf.xl_workbook.sheet_by_name(sheets['clubs'])
-    row = xl_sheet.row(0)
-    if row[0].value != "Club" or row[1].value != "Département":
-        raise Exception("La page 'Clubs' doit contenir des colonnes 'Club' et 'Département' (Trouvées: {})".format(
-            ", ".join([cell.value for cell in row])))
-    for row_idx in range(1,xl_sheet.nrows):
-        row = xl_sheet.row(row_idx)
-        if row[0].value != "":
-            club = Club(nom=row[0].value, departement=row[1].value)
-            conf.clubs[club.nom] = club
-
-    print("- Lecture des officiels")
-    xl_sheet = conf.xl_workbook.sheet_by_name(sheets['officiels'])
-    row = xl_sheet.row(0)
-    if row[0].value != "Nom" or row[1].value != "Club" or row[2].value != "A depuis" or row[3].value != "B depuis":
-        raise Exception("La page 'Officiels' doit contenir des colonnes 'Nom', 'Club', 'A depuis' et 'B depuis' "
-                        "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
-    for row_idx in range(1,xl_sheet.nrows):
-        row = xl_sheet.row(row_idx)
-        if row[0].value != "":
-            club = row[1].value
-            if club not in clubs:
-                print("WARNING: Le club {} pour l'officiel {} n'a pas été trouvé".format(club, row[0].value))
-            else:
-                club = clubs[club]
-                officiel = Officiel(nom=row[0].value, club=club, b_depuis=row[2].value)
-                conf.officiels[officiel.nom] = officiel
-
-    print("- Lecture des postes")
-    xl_sheet = conf.xl_workbook.sheet_by_name(sheets['postes'])
-    row = xl_sheet.row(0)
-    if row[0].value != "Poste" or row[1].value != "Niveau":
-        raise Exception("La page 'Postes' doit contenir des colonnes 'Postes' et 'Niveau' "
-                        "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
-    for row_idx in range(1,xl_sheet.nrows):
-        row = xl_sheet.row(row_idx)
-        if row[0].value != "":
-            conf.postes[row[0].value] = row[1].value
-
-    return conf
-
 
 
 
 
 if __name__ == "__main__":
-    conf = getConfiguration('Officiels.xls')
-    for club in conf.clubs.values():
-        print(club)
-    for officiel in conf.officiels.values():
-        print(officiel)
-    for role in conf.postes:
-        print("{} ({})".format(role, conf.postes[role]))
-    exit()
-
-    competition = parseJury(33007)
-    parseParticipations(competition)
+    conf = Configuration('Officiels.xls')
+    competition = Competition(conf, 33007)
 
     for reunion in competition.reunions:
         print(reunion.titre)
