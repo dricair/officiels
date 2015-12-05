@@ -8,8 +8,9 @@
 .. moduleauthor: Cedric Airaud <cairaud@gmail.com>
 """
 
+import os
 from bs4 import BeautifulSoup
-from openpyxl import Workbook
+from openpyxl import load_workbook
 import requests
 
 import logging
@@ -121,13 +122,16 @@ class Reunion:
 Represent an Officiel
 """
 class Officiel:
-    def __init__(self, nom, club, b_depuis=None):
+    def __init__(self, nom, club, index, b_depuis=None, a_depuis=None):
         self.nom = nom
         self.club = club
+        self.index = index
         self.b_depuis = b_depuis
+        self.a_depuis = a_depuis
 
     def __str__(self):
         return "{nom} ({club})".format(**self.__dict__)
+
 
 
 """
@@ -151,53 +155,51 @@ class Configuration:
         self.clubs = {}
         self.postes = {}
         self.dirty = False
+        self.filename = filename
 
-        self.xl_workbook = xlrd.open_workbook(filename)
-        sheet_names = self.xl_workbook.sheet_names()
+        self.wb = load_workbook(filename, guess_types=True)
         log.info("Configuration depuis le fichier '{}:".format(filename))
 
-        sheets = {'clubs': 'Clubs', 'officiels': 'Officiels', 'postes': 'Postes'}
-        if len(set(self.xl_workbook.sheet_names()) & set(sheets.values())) != 3:
+        self.sheets = {'clubs': 'Clubs', 'officiels': 'Officiels', 'postes': 'Postes', 'competitions': 'Compétitions'}
+        if len(set(self.wb.get_sheet_names()) & set(self.sheets.values())) != 4:
             raise Exception("Le fichier {} doit contenir les pages {} (Trouvées: {})".format(
-                filename, ', '.join(sheets.values()), ', '.join(self.xl_workbook.sheet_names())))
+                filename, ', '.join(self.sheets.values()), ', '.join(self.wb.get_sheet_names())))
 
         log.info("- Lecture des clubs")
-        xl_sheet = self.xl_workbook.sheet_by_name(sheets['clubs'])
-        row = xl_sheet.row(0)
+        xl_sheet = self.wb.get_sheet_by_name(self.sheets['clubs'])
+        header = True
+        row = xl_sheet.rows[0]
         if row[0].value != "Club" or row[1].value != "Département":
             raise Exception("La page 'Clubs' doit contenir des colonnes 'Club' et 'Département' (Trouvées: {})".format(
                 ", ".join([cell.value for cell in row])))
-        for row_idx in range(1,xl_sheet.nrows):
-            row = xl_sheet.row(row_idx)
+        for row in xl_sheet.rows[1:]:
             if row[0].value != "":
                 club = Club(nom=row[0].value, departement=row[1].value)
                 self.clubs[club.nom] = club
 
         log.info("- Lecture des officiels")
-        xl_sheet = self.xl_workbook.sheet_by_name(sheets['officiels'])
-        row = xl_sheet.row(0)
+        xl_sheet = self.wb.get_sheet_by_name(self.sheets['officiels'])
+        row = xl_sheet.rows[0]
         if row[0].value != "Nom" or row[1].value != "Club" or row[2].value != "A depuis" or row[3].value != "B depuis":
             raise Exception("La page 'Officiels' doit contenir des colonnes 'Nom', 'Club', 'A depuis' et 'B depuis' "
                             "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
-        for row_idx in range(1,xl_sheet.nrows):
-            row = xl_sheet.row(row_idx)
+        for index, row in enumerate(xl_sheet.rows[1:]):
             if row[0].value != "":
                 club = row[1].value
                 if club not in self.clubs:
                     print("WARNING: Le club {} pour l'officiel {} n'a pas été trouvé".format(club, row[0].value))
                 else:
                     club = self.clubs[club]
-                    officiel = Officiel(nom=row[0].value, club=club, b_depuis=row[2].value)
+                    officiel = Officiel(nom=row[0].value, club=club, a_depuis=row[2].value, b_depuis=row[3])
                     self.officiels[officiel.nom] = officiel
 
         log.info("- Lecture des postes")
-        xl_sheet = self.xl_workbook.sheet_by_name(sheets['postes'])
-        row = xl_sheet.row(0)
+        xl_sheet = self.wb.get_sheet_by_name(self.sheets['postes'])
+        row = xl_sheet.rows[0]
         if row[0].value != "Poste" or row[1].value != "Niveau":
             raise Exception("La page 'Postes' doit contenir des colonnes 'Postes' et 'Niveau' "
                             "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
-        for row_idx in range(1,xl_sheet.nrows):
-            row = xl_sheet.row(row_idx)
+        for row in xl_sheet.rows[1:]:
             if row[0].value != "":
                 self.postes[row[0].value] = row[1].value
 
@@ -210,11 +212,65 @@ class Configuration:
             log.warning("L'officiel {} (Club {}) n'existe pas".format(nom, club))
             officiel = Officiel(nom, club)
             self.officiels[nom] = officiel
-            sheet = self.xl_workbook.sheet_by_name(sheets['officiels'])
-
-
+            sheet = self.wb.get_sheet_by_name(self.sheets['officiels'])
+            num_rows = len(sheet.rows)
+            sheet.cell(row=num_rows+1, column=1, value=nom)
+            sheet.cell(row=num_rows+1, column=2, value=club)
+            self.dirty = True
 
         return self.officiels[nom]
+
+
+    def checkRole(self, officiel, poste, date):
+        """
+        Check that the poste matches the level for the Officiel
+        :param officiel Officiel to check
+        :type officiel Officiel
+        :param poste Name of the poste
+        :type poste basestring
+        :param date date of competition to check
+        :type date datetime
+        """
+        if not poste in self.postes:
+            log.error("Le poste '{}' n'est pas listé dans le fichier de configuration")
+            return True
+
+        niveau = conf.postes[poste]
+        update = False
+        if niveau == 'A' and not self.a_depuis:
+            log.warning("L'officiel {} semble avoir le niveau A")
+            officiel.a_depuis = date
+            if not officiel.b_depuis: officiel.b_depuis =
+            update = True
+
+        elif niveau == 'B' and not self.b_depuis:
+            log.warning("L'officiel {} semble avoir le niveau A")
+            update = True
+
+        if update:
+            for row in self.wb.get_sheet_by_name(self.sheets['officiels']).rows[1]:
+                if row[0] == officiel.nom:
+                    row[2] = officiel.a_depuis
+                    row[3] = officiel.b_depuis
+                    break
+            self.dirty = True
+
+
+
+    def save(self):
+        """
+        Save the file if it has been updated
+        """
+        if self.dirty:
+            backup_filename = self.filename + ".bak"
+            log.info("Mise à jour du fichier {} (Sauvegarde: {})".format(self.filename, backup_filename))
+            os.rename(self.filename, backup_filename)
+            try:
+                self.wb.save(self.filename)
+            except Exception as e:
+                os.rename(backup_filename, self.filename)
+                log.error("Erreur lors de la mise à jour, restoration de la sauvegarde.\n" + str(e))
+            self.dirty = False
 
 
 
@@ -240,8 +296,9 @@ def points(competition, reunion, club):
 
 
 if __name__ == "__main__":
-    conf = Configuration('Officiels.xls')
+    conf = Configuration('Officiels.xlsx')
     competition = Competition(conf, 33007)
+    conf.save()
 
     for reunion in competition.reunions:
         print(reunion.titre)
