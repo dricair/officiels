@@ -12,18 +12,28 @@ import os
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 import requests
+import argparse
 
 import logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)-9s %(lineno)-4s %(message)s")
+
+import gen_pdf
 
 jury_url = "http://ffn.extranat.fr/webffn/resultats.php?idact=nat&idcpt={competition}&go=off"
 clubs_url = "http://ffn.extranat.fr/webffn/resultats.php?idact=nat&idcpt={competition}&go=clb"
 
 
+class CompetitionException (Exception):
+    pass
+
+class ReunionException (Exception):
+    pass
+
 class Competition:
     """
     Represent a competition, composed of several Reunions
     """
+    NIVEAU_REGIONAL = "Régional"
 
     def __init__(self, conf, competition_index):
         """
@@ -37,7 +47,7 @@ class Competition:
         # Get some info from configuration
         self.date = conf.competitions[competition_index]["date"]
         self.equipe = conf.competitions[competition_index]["equipe"]
-        self.regional = conf.competitions[competition_index]["regional"]
+        self.niveau = conf.competitions[competition_index]["niveau"]
 
         if self.equipe:
             try:
@@ -52,51 +62,66 @@ class Competition:
 
         entete = soup.find("fieldset", class_="enteteCompetition")
         spans = entete.find_all("span")
-        self.type, self.titre = spans[0].text, entete.text.splitlines()[-1]
-        logging.debug("{} - {} - {} ".format(self.type, self.titre, self.date))
+        self.titre, self.type = spans[0].text, entete.text.splitlines()[-1]
+        logging.info("{} - {} - {} ".format(self.type, self.titre, self.date.strftime("%d/%m/%Y")))
 
+        reunions = []
         self.reunions = []
         self.participations = {}
         table = entete.find_next_sibling("table")
 
-        for tr in table.find_all("tr"):
-            tds = tr.find_all("td")
-            if tds[0]['id'] == "mainResEpr":
-                reunion = Reunion(self, titre=tds[0].text.strip())
-                self.reunions.append(reunion)
-                logging.debug("Réunion trouvée: " + str(reunion))
-            else:
-                if len(tds) != 3:
-                    logging.fatal("Besoin de 3 colonnes par officiel: " + tds.text)
-                if not reunion:
-                    logging.fatal("Pas d'entête de réunion trouvé: " + tds.text)
-                poste, nom, club = tds[0].text.replace(":", "").strip(), tds[1].text, tds[2].text
-                if poste in conf.postes and not conf.postes[poste]:
-                    logging.debug("{} au poste {} est ignoré".format(nom, poste))
-                elif club in conf.clubs:
-                    officiel = conf.find_officiel(nom=nom, club=club)
-                    logging.debug("Officiel trouvé: " + str(officiel))
-                    if officiel not in reunion.officiels and conf.checkPoste(officiel, poste):
-                        reunion.officiels.append(officiel)
-                elif club != "NATATION AZUR":
-                    logging.warning("Officiel ignoré: {} car le club {} n'est pas dans la liste".format(nom, club))
-
-        # Parse participations
-        url = clubs_url.format(competition=competition_index)
-        data = requests.get(url).text
-
-        soup = BeautifulSoup(data, 'html.parser')
-
-        table = soup.find("table", class_="tableau")
-        for tr in table.find_all("tr"):
-            tds = tr.find_all("td")
-            if len(tds) == 13:
-                tds[1].b.clear()
-                club, num = tds[1].a.text.strip(), int(tds[4].text)
-                if club in conf.clubs:
-                    self.participations[club] = num
+        try:
+            for tr in table.find_all("tr"):
+                tds = tr.find_all("td")
+                if tds[0]['id'] == "mainResEpr":
+                    reunion = Reunion(self, titre=tds[0].text.strip())
+                    reunions.append(reunion)
+                    logging.debug("Réunion trouvée: " + str(reunion))
                 else:
-                    logging.warning("Club {} ignoré pour les participations car pas dans la liste".format(club))
+                    if len(tds) != 3:
+                        logging.fatal("Besoin de 3 colonnes par officiel: " + tds.text)
+                    if not reunion:
+                        logging.fatal("Pas d'entête de réunion trouvé: " + tds.text)
+                    poste, nom, club = tds[0].text.replace(":", "").strip(), tds[1].text, tds[2].text
+                    if poste in conf.postes and not conf.postes[poste]:
+                        logging.debug("{} au poste {} est ignoré".format(nom, poste))
+                    elif club in conf.clubs:
+                        officiel = conf.find_officiel(nom=nom, club=club)
+                        logging.debug("Officiel trouvé: " + str(officiel))
+                        if officiel not in reunion.officiels and conf.check_poste(officiel, poste):
+                            reunion.officiels.append(officiel)
+                    elif club != "NATATION AZUR":
+                        logging.warning("Officiel ignoré: {} car le club {} n'est pas dans la liste".format(nom, club))
+
+            # Not enough officiels for a reunion: ignore it
+            for reunion in reunions:
+                if len(reunion.officiels) < 5:
+                    logging.warning("La réunion {} est ignorée: {} officiels".format(reunion.titre,
+                                                                                     len(reunion.officiels)))
+                else:
+                    self.reunions.append(reunion)
+
+            # Parse participations
+            url = clubs_url.format(competition=competition_index)
+            data = requests.get(url).text
+
+            soup = BeautifulSoup(data, 'html.parser')
+
+            table = soup.find("table", class_="tableau")
+            for tr in table.find_all("tr"):
+                tds = tr.find_all("td")
+                if len(tds) == 13:
+                    tds[1].b.clear()
+                    club, num = tds[1].a.text.strip(), int(tds[4].text)
+                    if club in conf.clubs:
+                        self.participations[club] = num
+                    else:
+                        logging.warning("Club {} ignoré pour les participations car pas dans la liste".format(club))
+
+        except KeyError as e:
+            logging.warning("Pas de résultats pour la compétition {} du {}".format(self.titre,
+                                                                                   self.date.strftime("%D/%m/%Y")))
+
 
     def __str__(self):
         return "{titre}\n{type}\n{date}\n\n".format(**self.__dict__) + "\n\n".join(map(str, self.reunions))
@@ -106,6 +131,7 @@ class Reunion:
     """
     Represent a Reunion, base for the calculation
     """
+
     def __init__(self, competition, titre):
         self.competition = competition
         self.titre = titre
@@ -130,10 +156,12 @@ class Reunion:
 
         return self._officiels_per_club
 
-    def points(self, club):
+    def points(self, club, details=None):
         """
         :param club: Club to look for
         :type club: Club
+        :param details: Optional list to get detail about calculation
+        :type details: None|List
         :return: Number of points
         :rtype: int
         """
@@ -152,29 +180,46 @@ class Reunion:
                 needed = (0, 0)
             elif participations < 10:
                 needed = (0, 1)
-            elif participations < 20 or competition.regional:
+            elif participations < 20 or competition.niveau == Competition.NIVEAU_REGIONAL:
                 needed = (1, 2)
             else:
                 needed = (1, 3)
 
+        if type(details) is list:
+            s = "{} officiels requis".format(needed[1])
+            if needed[0] > 0:
+                s += ", dont {} A ou B".format(needed[0])
+            details.append(s)
+
         num_ab, num = 0, 0
-        club_officiels = reunion.officiels_per_club().get(club.nom, [])
+        club_officiels = self.officiels_per_club().get(club.nom, [])
         for officiel in club_officiels:
             num += 1
             level = officiel.get_level(self.competition.date)
             if level == 'A' or level == 'B':
                 num_ab += 1
 
-        if competition.regional:
-            num = min(5, num)
+        if competition.niveau == Competition.NIVEAU_REGIONAL and num > 5:
+            if type(details) is list:
+                details.append("5 officiels retenus sur les {} présentés".format(num))
+            num = 5
 
         # TODO: Officiel manquant -4 point, sans bon statut -2 points. Dans quel ordre ?
         if num < needed[1]:
-            pts = (needed[1] - num) * -4
+            missing = needed[1] - num
+            pts = missing * -4
+            if type(details) is list:
+                details.append("{} points négatifs pour {} officiels manquants".format(-pts, missing))
         else:
-            pts = (num - needed[1]) * 2
+            extra = num - needed[1]
+            pts = extra * 2
+            if extra > 0 and type(details) is list:
+                details.append("{} points supplémentaires pour {} officiels".format(pts, extra))
             if num_ab < needed[0]:
-                pts += (needed[0] - num_ab) * -2
+                missing = needed[0] - num_ab
+                pts += missing * -2
+                if type(details) is list:
+                    details.append("{} points de malus par manque d'officiel A/B".format(missing*2))
 
         return pts
 
@@ -277,15 +322,15 @@ class Configuration:
         xl_sheet = self.wb.get_sheet_by_name(self.sheets["competitions"])
         row = xl_sheet.rows[0]
         if (row[0].value != "Numéro" or row[1].value != "Date" or row[2].value != "Compétition" or
-                row[3].value != "Régional" or row[4].value != "Équipe"):
+                row[3].value != "Niveau" or row[4].value != "Équipe"):
             raise Exception("La page 'Compétition' doit contenir des colonnes 'Numéro', 'Date' "
-                            "'Compétition', 'Régional' et 'Équipe' "
+                            "'Compétition', 'Niveau' et 'Équipe' "
                             "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
         for row in xl_sheet.rows[1:]:
-            if row[0].value != "":
+            if row[0].value:
                 self.competitions[row[0].value] = {"date": row[1].value,
                                                    "titre": row[2].value,
-                                                   "regional": row[3].value == "x",
+                                                   "niveau": row[3].value,
                                                    "equipe": row[4].value}
 
     def find_officiel(self, nom, club):
@@ -294,7 +339,7 @@ class Configuration:
         """
         if nom not in self.officiels:
             logging.warning("L'officiel {} (Club {}) n'existe pas".format(nom, club))
-            officiel = Officiel(nom, club)
+            officiel = Officiel(nom, self.clubs[club])
             self.officiels[nom] = officiel
             sheet = self.wb.get_sheet_by_name(self.sheets['officiels'])
             num_rows = len(sheet.rows)
@@ -305,7 +350,7 @@ class Configuration:
         return self.officiels[nom]
 
 
-    def checkPoste(self, officiel, poste):
+    def check_poste(self, officiel, poste):
         """
         Check that the poste matches the level for the Officiel
         :param officiel Officiel to check
@@ -345,30 +390,53 @@ class Configuration:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Liste des compétitions')
+    parser.add_argument("--conf", default="Officiels.xlsx", help="Fichier de configuration")
+
+    args = parser.parse_args()
+
+    print(args.conf)
+    print(args.update)
+
     conf = Configuration('Officiels.xlsx')
-    competition = Competition(conf, 34325)
-    conf.save()
 
-    for reunion in competition.reunions:
-        print(reunion.titre)
+    competitions = []
 
-        off_per_club = reunion.officiels_per_club()
-        for club, num in sorted(competition.participations.items()):
-            officiels = off_per_club.get(club, [])
-            if competition.equipe:
-                participations = "{} équipes".format(num // competition.equipe)
-            else:
-                participations = "{} participations".format(num)
+    doc = gen_pdf.DocTemplate(conf, "Compétitions.pdf", "Liste des compétitions", "Cédric Airaud")
+    for competition_index in sorted(conf.competitions.keys()):
+        competitions.append(Competition(conf, competition_index))
+        conf.save()
 
-            print(" {club:30s}: {participations}, {officiels} officiels {officiels_str} -->"
-                  " {points} points".format(
-                    club=club, participations=participations, officiels=len(officiels),
-                    officiels_str=" ({})".format(", ".join(["{}: {}".format(off.nom, off.get_level(competition.date))
-                    for off in officiels])) if len(officiels) else "",
-                    points=reunion.points(conf.clubs[club])
-            ))
+    points = {"Département": {},
+              "Régional": {}}
 
-        print("\n")
+    for competition in competitions:
+        doc.new_competition(competition)
+
+    doc.build()
+
+    # for reunion in competition.reunions:
+    #     print(reunion.titre)
+    #
+    #     off_per_club = reunion.officiels_per_club()
+    #     for club, num in sorted(competition.participations.items()):
+    #         officiels = off_per_club.get(club, [])
+    #         if competition.equipe:
+    #             participations = "{} équipes".format(num // competition.equipe)
+    #         else:
+    #             participations = "{} participations".format(num)
+    #
+    #         print(" {club:30s}: {participations}, {officiels} officiels {officiels_str} -->"
+    #               " {points} points".format(
+    #                 club=club, participations=participations, officiels=len(officiels),
+    #                 officiels_str=" ({})".format(", ".join(["{}: {}".format(off.nom, off.get_level(competition.date))
+    #                 for off in officiels])) if len(officiels) else "",
+    #                 points=reunion.points(conf.clubs[club])
+    #         ))
+    #
+    #     print("\n")
+
+
 
 
 

@@ -1,0 +1,193 @@
+# -* -coding: utf-8 -*-
+
+"""
+.. module: gen_pdf.py
+   :platform: Unix, Windows
+   :synopsys: Generate PDF for a list of competitions
+
+.. moduleauthor: Cedric Airaud <cairaud@gmail.com>
+"""
+
+import logging
+import datetime
+
+from reportlab.platypus import BaseDocTemplate, PageTemplate, NextPageTemplate, PageBreak, Frame
+from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus.flowables import ListItem, ListFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont, TTFError
+
+PAGE_HEIGHT = A4[1]
+PAGE_WIDTH = A4[0]
+styles = getSampleStyleSheet()
+
+try:
+  pdfmetrics.registerFont(TTFont("Trebuchet","/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS.ttf"))
+  pdfmetrics.registerFont(TTFont("Trebuchet-bold","/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Bold.ttf"))
+  pdfmetrics.registerFont(TTFont("Trebuchet-italic","/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Italic.ttf"))
+  pdfmetrics.registerFont(TTFont("Trebuchet-bold-italic","/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Bold_Italic.ttf"))
+  trebuchet_available = True
+except TTFError as e:
+  logging.warning("Font Trebuchet non disponible")
+  trebuchet_available = False
+
+sNormal = styles['Normal']
+
+header_table_style = {
+    "Départemental": TableStyle([('BOX',        (0, 0), (-1, -1), 0.25, "#FF4500"),
+                                 ('ALIGN',      (0, 0), (-1, -1), 'CENTER'),
+                                 ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
+                                 ('BACKGROUND', (0, 0), (-1, -1), "#FF8C00"),
+                                 ('TEXTCOLOR',  (0, 0), (-1, -1), colors.white),
+                                 ('FONTSIZE',   (0, 0), (-1,  0), 14),
+                                 ('FONTSIZE',   (0, 1), (-1, -1), 10),
+                                 ]),
+    "Régional":      TableStyle([('BOX',        (0, 0), (-1, -1), 0.25, "#2B7739"),
+                                 ('ALIGN',      (0, 0), (-1, -1), 'CENTER'),
+                                 ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
+                                 ('BACKGROUND', (0, 0), (-1, -1), "#48B35E",),
+                                 ('TEXTCOLOR',  (0, 0), (-1, -1), colors.white),
+                                 ('FONTSIZE',   (0, 0), (-1,  0), 14),
+                                 ('FONTSIZE',   (0, 1), (-1, -1), 10),
+                                 ]),
+    }
+
+
+class ReunionTemplate(PageTemplate):
+    """
+    Default template for a Competition/Reunion
+    """
+    def __init__(self):
+        super().__init__(id='reunion')
+        self.page_width = PAGE_WIDTH-2*cm
+        self.frames.append(Frame(x1=cm, y1=2*cm, height=PAGE_HEIGHT-4*cm, width=self.page_width))
+
+    def beforeDrawPage(self, canv, doc):
+        logging.debug("ReunionTemplate.beforeDrawPage, newCompetition={}".format(str(doc.newCompetition)))
+
+        canv.saveState()
+        canv.setFont('Times-Roman', 9)
+        canv.setFillColor(colors.grey)
+        canv.setStrokeColor(colors.grey)
+
+        # Header
+        if not doc.newCompetition:
+            canv.drawCentredString(PAGE_WIDTH/2.0, PAGE_HEIGHT-cm, doc.competition.titre)
+            canv.line(cm, PAGE_HEIGHT-1.3*cm, PAGE_WIDTH-cm, PAGE_HEIGHT-1.3*cm)
+        doc.newCompetition = False
+
+        # Footer
+        canv.drawCentredString(PAGE_WIDTH/2.0, cm,
+                               "Page {} - Mis à jour le {}".format(doc.page,
+                                                                   datetime.date.today().strftime("%d/%m/%Y")))
+
+        canv.restoreState()
+
+
+class DocTemplate(BaseDocTemplate):
+    def __init__(self, conf, filename, title, author):
+        super().__init__(filename, pagesize=A4, title=title, author=author)
+        self.addPageTemplates(ReunionTemplate())
+        self.story = []
+        self.conf = conf
+        self.competition = None
+        self.newCompetition = True
+        self.page_width = self.pageTemplates[0].page_width
+
+    def new_competition(self, competition):
+        """
+        Add a competition on a new page
+        :param competition: New competition
+        :type competition: Competition
+        """
+        logging.debug("New competition: " + competition.titre)
+
+        if not self.story:
+            # For the first page
+            self.competition = competition
+        else:
+            self.story.append(NextPageTemplate(competition))
+            self.story.append(PageBreak())
+
+        if competition.niveau in header_table_style:
+            table_style = header_table_style[competition.niveau]
+        else:
+            table_style = header_table_style["Régional"]
+
+        table_data = [[competition.titre], [competition.type]]
+        self.story.append(Table(table_data, [self.page_width], 2 * [cm], style=table_style))
+
+        if competition.reunions:
+            for reunion in competition.reunions:
+                self.new_reunion(reunion)
+        else:
+            self.story.append(Paragraph("Pas de résultats trouvés pour cette compétition", sNormal))
+
+    def new_reunion(self, reunion):
+        logging.debug("New reunion: " + reunion.titre)
+
+        self.story.append(Paragraph(reunion.titre, styles["h2"]))
+
+        table_style = TableStyle([('BOX',        (0, 0), (-1, -1), 0.25, colors.black),
+                                  ('INNERGRID',  (0, 0), (-1, -1), 0.25, colors.black),
+                                  ('BACKGROUND', (0, 0), (-1,  0), "#DCE2F1"),
+                                  ('FONTSIZE',   (0, 0), (-1, -1), 10),
+                                  ('VALIGN',     (0, 0), (-1, -1), "TOP"),
+                                  ])
+        table_data = [["Club", "Officiels", "Points"]]
+        off_per_club = reunion.officiels_per_club()
+        for club, num in sorted(reunion.competition.participations.items()):
+            club = self.conf.clubs[club]
+            if reunion.competition.equipe:
+                participations = "{} équipes".format(num // reunion.competition.equipe)
+            else:
+                participations = "{} participations".format(num)
+
+            details = []
+            points = reunion.points(club, details)
+            paragraph_points = [Paragraph("<b>{} points</b>".format(points), sNormal)]
+            if len(details) > 0:
+                paragraph_points.append(ListFlowable([ListItem(Paragraph(d, sNormal), leftIndex=20, value='-') for d in details],
+                                                     bulletType='bullet'))
+            else:
+                print("No details")
+
+            officiels = "\n".join(sorted(["{}: {}".format(off.get_level(reunion.competition.date), off.nom)
+                                  for off in off_per_club.get(club.nom, [])]))
+            table_data.append([club.nom + "\n" + participations, officiels, paragraph_points])
+
+        self.story.append(Table(table_data, 3 * [self.page_width / 3.0], style=table_style))
+
+    def build(self):
+        """
+        Create the PDF
+        """
+        super().build(self.story)
+
+    # Handler functions
+    def handle_pageBegin(self):
+        """
+        New page starting
+        """
+        logging.debug("doc.handle_pageBegin")
+        self.newCompetition = False
+        super().handle_pageBegin()
+
+    def handle_nextPageTemplate(self, pt):
+        """
+        Changing page template
+        """
+        logging.debug("doc.handle_nextPageTemplate")
+        self.newCompetition = True
+        self.competition = pt
+        super().handle_nextPageTemplate('reunion')
+
+
+
+
+
