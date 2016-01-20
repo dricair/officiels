@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 import requests
 import argparse
+import datetime
 
 import logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)-9s %(lineno)-4s %(message)s")
@@ -33,6 +34,7 @@ class Competition:
     """
     Represent a competition, composed of several Reunions
     """
+    NIVEAU_DEPARTEMENTAL = "Départemental"
     NIVEAU_REGIONAL = "Régional"
 
     def __init__(self, conf, competition_index):
@@ -74,7 +76,7 @@ class Competition:
             for tr in table.find_all("tr"):
                 tds = tr.find_all("td")
                 if tds[0]['id'] == "mainResEpr":
-                    reunion = Reunion(self, titre=tds[0].text.strip())
+                    reunion = Reunion(self, titre=tds[0].text.strip(), index=len(reunions))
                     reunions.append(reunion)
                     logging.debug("Réunion trouvée: " + str(reunion))
                 else:
@@ -115,6 +117,7 @@ class Competition:
                     club, num = tds[1].a.text.strip(), int(tds[4].text)
                     if club in conf.clubs:
                         self.participations[club] = num
+                        conf.clubs[club].competitions.append(self)
                     else:
                         logging.warning("Club {} ignoré pour les participations car pas dans la liste".format(club))
 
@@ -122,9 +125,11 @@ class Competition:
             logging.warning("Pas de résultats pour la compétition {} du {}".format(self.titre,
                                                                                    self.date.strftime("%D/%m/%Y")))
 
-
     def __str__(self):
         return "{titre}\n{type}\n{date}\n\n".format(**self.__dict__) + "\n\n".join(map(str, self.reunions))
+
+    def link(self):
+        return "C{}".format(self.index)
 
 
 class Reunion:
@@ -132,11 +137,14 @@ class Reunion:
     Represent a Reunion, base for the calculation
     """
 
-    def __init__(self, competition, titre):
+    def __init__(self, competition, titre, index):
         self.competition = competition
         self.titre = titre
+        self.index = index
         self.officiels = []
         self._officiels_per_club = None
+        self.pts = {}
+        self.details = {}
 
     def __str__(self):
         return self.titre + "\n  " + "\n  ".join(map(str, self.officiels))
@@ -165,6 +173,11 @@ class Reunion:
         :return: Number of points
         :rtype: int
         """
+        if club in self.pts and (club in self.details or details is None):
+            if details is not None:
+                details += self.details[club]
+            return self.pts[club]
+
         participations = self.competition.participations.get(club.nom, 0)
 
         # needed = (Num of A/B, Total num)
@@ -221,18 +234,27 @@ class Reunion:
                 if type(details) is list:
                     details.append("{} points de malus par manque d'officiel A/B".format(missing*2))
 
+        if details is not None:
+            self.details[club] = details
+        self.pts[club] = pts
         return pts
+
+    def link(self):
+        return "{}_R{}".format(self.competition.index, self.index)
 
 
 class Officiel:
     """
     Represent an Officiel
     """
-    def __init__(self, nom, club, b_depuis=None, a_depuis=None):
+    def __init__(self, nom, club, a_depuis=None, b_depuis=None, c_depuis=None, valide=None):
         self.nom = nom
         self.club = club
-        self.b_depuis = b_depuis
         self.a_depuis = a_depuis
+        self.b_depuis = b_depuis
+        self.c_depuis = c_depuis
+        self.valide = valide
+        self.index = 0
 
     def __str__(self):
         return "{nom} ({club})".format(**self.__dict__)
@@ -253,12 +275,17 @@ class Club:
     """
     Club
     """
-    def __init__(self, nom, departement):
+    def __init__(self, nom, departement, index):
         self.nom = nom
         self.departement = departement
+        self.index = index
+        self.competitions = []
 
     def __str__(self):
         return "{} ({})".format(self.nom, self.departement)
+
+    def link(self):
+        return "Club{}".format(self.index)
 
 
 class Configuration:
@@ -287,17 +314,18 @@ class Configuration:
         if row[0].value != "Club" or row[1].value != "Département":
             raise Exception("La page 'Clubs' doit contenir des colonnes 'Club' et 'Département' (Trouvées: {})".format(
                 ", ".join([cell.value for cell in row])))
-        for row in xl_sheet.rows[1:]:
+        for num, row in enumerate(xl_sheet.rows[1:]):
             if row[0].value != "":
-                club = Club(nom=row[0].value, departement=row[1].value)
+                club = Club(nom=row[0].value, departement=row[1].value, index=num+1)
                 self.clubs[club.nom] = club
 
         logging.info("- Lecture des officiels")
         xl_sheet = self.wb.get_sheet_by_name(self.sheets['officiels'])
         row = xl_sheet.rows[0]
-        if row[0].value != "Nom" or row[1].value != "Club" or row[2].value != "A depuis" or row[3].value != "B depuis":
-            raise Exception("La page 'Officiels' doit contenir des colonnes 'Nom', 'Club', 'A depuis' et 'B depuis' "
-                            "(Trouvées: {})".format(", ".join([cell.value for cell in row])))
+        if (row[0].value != "Nom" or row[1].value != "Club" or row[2].value != "A depuis" or
+            row[3].value != "B depuis" or row[4].value != "C depuis" or row[5].value != "Valide"):
+            raise Exception("La page 'Officiels' doit contenir des colonnes 'Nom', 'Club', 'A depuis', 'B depuis' "
+                            "'C depuis' et 'Valide' (Trouvées: {})".format(", ".join([cell.value for cell in row])))
         for index, row in enumerate(xl_sheet.rows[1:]):
             if row[0].value != "":
                 club = row[1].value
@@ -305,7 +333,9 @@ class Configuration:
                     print("WARNING: Le club {} pour l'officiel {} n'a pas été trouvé".format(club, row[0].value))
                 else:
                     club = self.clubs[club]
-                    officiel = Officiel(nom=row[0].value, club=club, a_depuis=row[2].value, b_depuis=row[3].value)
+                    officiel = Officiel(nom=row[0].value, club=club, a_depuis=row[2].value, b_depuis=row[3].value,
+                                        c_depuis=row[4].value, valide=row[5].strip().lower() == "Oui")
+                    officiel.index = index
                     self.officiels[officiel.nom] = officiel
 
         logging.info("- Lecture des postes")
@@ -345,9 +375,25 @@ class Configuration:
             num_rows = len(sheet.rows)
             sheet.cell(row=num_rows+1, column=1, value=nom)
             sheet.cell(row=num_rows+1, column=2, value=club)
+            officiel.index = num_rows
             self.dirty = True
 
         return self.officiels[nom]
+
+    def update_officiel(self, officiel):
+        """
+        Update an officiel in the file
+        :param officiel: Officiel to update
+        :type officiel: Officiel
+        """
+        sheet = self.wb.get_sheet_by_name(self.sheets['officiels'])
+        sheet.cell(row=officiel.index+1, column=1, value=officiel.nom)
+        sheet.cell(row=officiel.index+1, column=2, value=officiel.club.nom)
+        sheet.cell(row=officiel.index+1, column=3, value=officiel.a_depuis)
+        sheet.cell(row=officiel.index+1, column=4, value=officiel.b_depuis)
+        sheet.cell(row=officiel.index+1, column=5, value=officiel.c_depuis)
+        sheet.cell(row=officiel.index+1, column=6, value="Oui" if officiel.valide else "Non")
+        self.dirty = True
 
 
     def check_poste(self, officiel, poste):
@@ -389,16 +435,65 @@ class Configuration:
             self.dirty = False
 
 
+    def update_officiels(self, filename):
+        """
+        Update the list of officiels
+        :param filename: File to load
+        :type filename: string
+        """
+        wb = load_workbook(args.update, guess_types=True)
+        sheet = wb.active
+        logging.info("Mise à jour des officiels depuis le fichier {}".format(filename))
+
+        header = [cell.value for cell in sheet.rows[0]]
+        labels = {}
+        for label in ('nom', 'prenom', 'niveau_libelle', 'date_obtention_fr', 'validite_periode', 'dernier_club'):
+            try:
+                labels[label] = header.index(label)
+            except ValueError:
+                logging.fatal("Pas de cellule '{}' trouvée".format(label))
+
+        for row in sheet.rows[1:]:
+            if row[labels['validite_periode']].value != 'titre_perime':
+                name = row[labels['nom']].value + " " + row[labels['prenom']].value
+                date = datetime.datetime.strptime(row[labels['date_obtention_fr']].value, "%d/%m/%Y")
+                club = row[labels['dernier_club']].value
+                level = row[labels['niveau_libelle']].value
+
+                if club in self.clubs:
+                    officiel = self.find_officiel(name, club)
+                    if level in ("Officiel A") and not officiel.a_depuis:
+                        logging.info("Mise à jour du niveau A pour {}".format(str(officiel)))
+                        officiel.a_depuis = date
+                        self.update_officiel(officiel)
+                    if level in ("Officiel A", "Officiel B", "Officiel A stagiaire") and not officiel.b_depuis:
+                        officiel.b_depuis = date
+                        logging.info("Mise à jour du niveau B pour {}".format(str(officiel)))
+                        self.update_officiel(officiel)
+                    if level in ("Officiel A", "Officiel B", "Officiel A stagiaire", "Officiel B stagiaire",
+                                 "Officiel C") and not officiel.c_depuis:
+                        officiel.c_depuis = date
+                        logging.info("Mise à jour du niveau B pour {}".format(str(officiel)))
+                        self.update_officiel(officiel)
+                else:
+                    logging.warning("L'officiel {} est ignoré (Club {})".format(name, club))
+
+            else:
+                logging.debug("Licence périmée pour l'officiel {}".format(name))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Liste des compétitions')
     parser.add_argument("--conf", default="Officiels.xlsx", help="Fichier de configuration")
+    parser.add_argument("--update", help="Mettre à jour la liste des officiels")
 
     args = parser.parse_args()
 
-    print(args.conf)
-    print(args.update)
-
     conf = Configuration('Officiels.xlsx')
+    if args.update:
+        conf.update_officiels(args.update)
+        conf.save()
+        exit()
 
     competitions = []
 
@@ -407,34 +502,35 @@ if __name__ == "__main__":
         competitions.append(Competition(conf, competition_index))
         conf.save()
 
-    points = {"Département": {},
-              "Régional": {}}
+    points = {"Départemental": {"participations": 0},
+              "Régional":      {"participations": 0}}
+
+    for competition in competitions:
+        if competition.niveau in points:
+            l = points[competition.niveau]
+        else:
+            l = points["Régional"]
+
+        for club_name, num in competition.participations.items():
+            l["participations"] += num
+            if club_name not in l:
+                    l[club_name] = 0;
+
+        for reunion in competition.reunions:
+            for club_name in competition.participations.keys():
+                club = conf.clubs[club_name]
+                pts = reunion.points(club, details=[])
+                l[club_name] += pts
+
+    doc.participations = {level: l["participations"] for level, l in points.items()}
+
+    for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
+        doc.new_club(club)
 
     for competition in competitions:
         doc.new_competition(competition)
 
     doc.build()
-
-    # for reunion in competition.reunions:
-    #     print(reunion.titre)
-    #
-    #     off_per_club = reunion.officiels_per_club()
-    #     for club, num in sorted(competition.participations.items()):
-    #         officiels = off_per_club.get(club, [])
-    #         if competition.equipe:
-    #             participations = "{} équipes".format(num // competition.equipe)
-    #         else:
-    #             participations = "{} participations".format(num)
-    #
-    #         print(" {club:30s}: {participations}, {officiels} officiels {officiels_str} -->"
-    #               " {points} points".format(
-    #                 club=club, participations=participations, officiels=len(officiels),
-    #                 officiels_str=" ({})".format(", ".join(["{}: {}".format(off.nom, off.get_level(competition.date))
-    #                 for off in officiels])) if len(officiels) else "",
-    #                 points=reunion.points(conf.clubs[club])
-    #         ))
-    #
-    #     print("\n")
 
 
 
