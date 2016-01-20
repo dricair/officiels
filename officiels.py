@@ -247,13 +247,13 @@ class Officiel:
     """
     Represent an Officiel
     """
-    def __init__(self, nom, club, a_depuis=None, b_depuis=None, c_depuis=None, valide=None):
+    def __init__(self, nom, club, a_depuis=None, b_depuis=None, c_depuis=None):
         self.nom = nom
         self.club = club
         self.a_depuis = a_depuis
         self.b_depuis = b_depuis
         self.c_depuis = c_depuis
-        self.valide = valide
+        self.valid = True
         self.index = 0
 
     def __str__(self):
@@ -323,9 +323,9 @@ class Configuration:
         xl_sheet = self.wb.get_sheet_by_name(self.sheets['officiels'])
         row = xl_sheet.rows[0]
         if (row[0].value != "Nom" or row[1].value != "Club" or row[2].value != "A depuis" or
-            row[3].value != "B depuis" or row[4].value != "C depuis" or row[5].value != "Valide"):
+            row[3].value != "B depuis" or row[4].value != "C depuis"):
             raise Exception("La page 'Officiels' doit contenir des colonnes 'Nom', 'Club', 'A depuis', 'B depuis' "
-                            "'C depuis' et 'Valide' (Trouvées: {})".format(", ".join([cell.value for cell in row])))
+                            "'C depuis' (Trouvées: {})".format(", ".join([cell.value for cell in row])))
         for index, row in enumerate(xl_sheet.rows[1:]):
             if row[0].value != "":
                 club = row[1].value
@@ -334,7 +334,7 @@ class Configuration:
                 else:
                     club = self.clubs[club]
                     officiel = Officiel(nom=row[0].value, club=club, a_depuis=row[2].value, b_depuis=row[3].value,
-                                        c_depuis=row[4].value, valide=row[5].strip().lower() == "Oui")
+                                        c_depuis=row[4].value)
                     officiel.index = index
                     self.officiels[officiel.nom] = officiel
 
@@ -375,6 +375,7 @@ class Configuration:
             num_rows = len(sheet.rows)
             sheet.cell(row=num_rows+1, column=1, value=nom)
             sheet.cell(row=num_rows+1, column=2, value=club)
+            officiel.valid = False
             officiel.index = num_rows
             self.dirty = True
 
@@ -392,7 +393,6 @@ class Configuration:
         sheet.cell(row=officiel.index+1, column=3, value=officiel.a_depuis)
         sheet.cell(row=officiel.index+1, column=4, value=officiel.b_depuis)
         sheet.cell(row=officiel.index+1, column=5, value=officiel.c_depuis)
-        sheet.cell(row=officiel.index+1, column=6, value="Oui" if officiel.valide else "Non")
         self.dirty = True
 
 
@@ -500,7 +500,6 @@ if __name__ == "__main__":
     doc = gen_pdf.DocTemplate(conf, "Compétitions.pdf", "Liste des compétitions", "Cédric Airaud")
     for competition_index in sorted(conf.competitions.keys()):
         competitions.append(Competition(conf, competition_index))
-        conf.save()
 
     points = {"Départemental": {"participations": 0},
               "Régional":      {"participations": 0}}
