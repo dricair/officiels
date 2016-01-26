@@ -191,9 +191,9 @@ class Reunion:
         else:
             if participations <= 1:
                 needed = (0, 0)
-            elif participations < 10:
+            elif participations <= 10:
                 needed = (0, 1)
-            elif participations < 20 or competition.niveau == Competition.NIVEAU_REGIONAL:
+            elif participations <= 20 or competition.niveau == Competition.NIVEAU_REGIONAL:
                 needed = (1, 2)
             else:
                 needed = (1, 3)
@@ -207,6 +207,9 @@ class Reunion:
         num_ab, num = 0, 0
         club_officiels = self.officiels_per_club().get(club.nom, [])
         for officiel in club_officiels:
+            if not officiel.valid and competition.niveau != Competition.NIVEAU_REGIONAL:
+                logging.warning("L'officiel {} n'est pas valide et est ignoré".format(str(officiel)))
+                continue
             num += 1
             level = officiel.get_level(self.competition.date)
             if level == 'A' or level == 'B':
