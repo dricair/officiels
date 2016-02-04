@@ -12,11 +12,10 @@ import logging
 import datetime
 
 from reportlab.platypus import BaseDocTemplate, PageTemplate, NextPageTemplate, PageBreak, Frame
-from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.platypus.flowables import ListItem, ListFlowable
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
@@ -31,8 +30,10 @@ styles = getSampleStyleSheet()
 try:
     pdfmetrics.registerFont(TTFont("Trebuchet", "/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS.ttf"))
     pdfmetrics.registerFont(TTFont("Trebuchet-bold", "/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Bold.ttf"))
-    pdfmetrics.registerFont(TTFont("Trebuchet-italic", "/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Italic.ttf"))
-    pdfmetrics.registerFont(TTFont("Trebuchet-bold-italic", "/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Bold_Italic.ttf"))
+    pdfmetrics.registerFont(TTFont("Trebuchet-italic",
+                                   "/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Italic.ttf"))
+    pdfmetrics.registerFont(TTFont("Trebuchet-bold-italic",
+                                   "/usr/share/fonts/truetype/msttcorefonts/Trebuchet_MS_Bold_Italic.ttf"))
     trebuchet_available = True
 except TTFError as e:
     logging.warning("Font Trebuchet non disponible")
@@ -125,7 +126,7 @@ class ReunionTemplate(PageTemplate):
 
         # Header
         if not doc.newCompetition:
-            canv.drawCentredString(PAGE_WIDTH/2.0, PAGE_HEIGHT-cm, doc.competition.titre)
+            canv.drawCentredString(PAGE_WIDTH/2.0, PAGE_HEIGHT-cm, doc.competition.nom)
             canv.line(cm, PAGE_HEIGHT-1.3*cm, PAGE_WIDTH-cm, PAGE_HEIGHT-1.3*cm)
         doc.newCompetition = False
 
@@ -175,16 +176,18 @@ class DocTemplate(BaseDocTemplate):
         for departemental in (True, False):
             total = 0
             if departemental:
-                competitions = [c for c in club.competitions if c.niveau == Competition.NIVEAU_DEPARTEMENTAL]
+                competitions = [c for c in club.competitions if c.departemental()]
                 self.story.append(Paragraph("Compétitions départementales", sHeading2))
+                bonus = self.bonus["Départemental"]
             else:
-                competitions = [c for c in club.competitions if c.niveau != Competition.NIVEAU_DEPARTEMENTAL]
+                competitions = [c for c in club.competitions if not c.departemental()]
                 self.story.append(Paragraph("Compétitions régionales et plus", sHeading2))
+                bonus = self.bonus["Régional"]
 
             table_data = [["Compétition", "Réunions", "Points"]]
 
             for competition in competitions:
-                row = [Paragraph(competition.titre + "<br/>" + competition.type, sNormal), [], []]
+                row = [Paragraph(competition.nom + "<br/>" + competition.type, sNormal), [], []]
                 for reunion in competition.reunions:
                     pts = reunion.points(club)
                     total += pts
@@ -196,13 +199,19 @@ class DocTemplate(BaseDocTemplate):
             self.story.append(table)
             self.story.append(Paragraph("<br/>Total des points: {}".format(total), sNormal))
 
+            if total < 0:
+                self.story.append(Paragraph("Valeur du malus: {} €".format(total * 10), sNormal))
+            else:
+                self.story.append(Paragraph("Valeur du bonus (Estimation): {} €"
+                                            .format(total * bonus), sNormal))
+
     def new_competition(self, competition):
         """
         Add a competition on a new page
         :param competition: New competition
         :type competition: Competition
         """
-        logging.debug("New competition: " + competition.titre)
+        logging.debug("New competition: " + competition.nom)
 
         if not self.story:
             # For the first page
@@ -216,9 +225,9 @@ class DocTemplate(BaseDocTemplate):
         else:
             table_style = header_table_style["Régional"]
 
-        table_data = [[competition.titre], [competition.type]]
+        table_data = [[competition.nom], [competition.type]]
         table = Table(table_data, [self.page_width], 2 * [cm], style=table_style)
-        table.link_object = (competition, competition.titre)
+        table.link_object = (competition, competition.nom)
         self.story.append(table)
 
         if competition.reunions:
@@ -237,10 +246,11 @@ class DocTemplate(BaseDocTemplate):
         table_style = header_table_style["Content"]
         table_data = [["Club", "Officiels", "Points"]]
         off_per_club = reunion.officiels_per_club()
-        for club, num in sorted(reunion.competition.participations.items()):
-            club = self.conf.clubs[club]
-            if reunion.competition.equipe:
-                participations = "{} équipes".format(num // reunion.competition.equipe)
+        total_participations = 0
+        for club, num in sorted(reunion.participations.items(), key=lambda c: c[0].nom):
+            total_participations += num
+            if reunion.competition.par_equipe:
+                participations = "{} équipes".format(num // reunion.competition.par_equipe)
             else:
                 participations = "{} participations".format(num)
 
@@ -248,16 +258,17 @@ class DocTemplate(BaseDocTemplate):
             points = reunion.points(club, details)
             paragraph_points = [Paragraph("<b>{} points</b>".format(points), sNormal)]
             if len(details) > 0:
-                paragraph_points.append(ListFlowable([ListItem(Paragraph(d, sNormal), leftIndex=20, value='-') for d in details],
-                                                     bulletType='bullet'))
+                paragraph_points.append(ListFlowable([ListItem(Paragraph(d, sNormal), leftIndex=20, value='-')
+                                                      for d in details], bulletType='bullet'))
             else:
                 print("No details")
 
-            officiels = "\n".join(sorted(["{}: {}".format(off.get_level(reunion.competition.date), off.nom)
-                                  for off in off_per_club.get(club.nom, [])]))
+            officiels = "\n".join(sorted(["{}: {} {}".format(str(off.get_level()), off.prenom, off.nom)
+                                  for off in off_per_club.get(club, [])]))
             table_data.append([club.nom + "\n" + participations, officiels, paragraph_points])
 
         self.story.append(Table(table_data, 3 * [self.page_width / 3.0], style=table_style))
+        self.story.append(Paragraph("<br/>Total des participations: {}".format(total_participations), sNormal))
 
     def build(self):
         """
