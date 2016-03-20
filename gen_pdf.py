@@ -186,8 +186,9 @@ class DocTemplate(BaseDocTemplate):
 
             table_data = [["Compétition", "Réunions", "Points"]]
 
-            for competition in competitions:
-                row = [Paragraph(competition.nom + "<br/>" + competition.type, sNormal), [], []]
+            for competition in sorted(competitions, key=lambda c: c.startdate):
+                row = [Paragraph("{} - {}<br/>{}".format(competition.date_str(), competition.titre(),
+                                                         competition.type), sNormal), [], []]
                 for reunion in competition.reunions:
                     pts = reunion.points(club)
                     total += pts
@@ -200,9 +201,9 @@ class DocTemplate(BaseDocTemplate):
             self.story.append(Paragraph("<br/>Total des points: {}".format(total), sNormal))
 
             if total < 0:
-                self.story.append(Paragraph("Valeur du malus: {} €".format(total * 10), sNormal))
+                self.story.append(Paragraph("Valeur du malus: {:.2f} €".format(total * 10), sNormal))
             else:
-                self.story.append(Paragraph("Valeur du bonus (Estimation): {} €"
+                self.story.append(Paragraph("Valeur du bonus (Estimation): {:.2f} €"
                                             .format(total * bonus), sNormal))
 
     def new_competition(self, competition):
@@ -211,7 +212,7 @@ class DocTemplate(BaseDocTemplate):
         :param competition: New competition
         :type competition: Competition
         """
-        logging.debug("New competition: " + competition.nom)
+        logging.debug("New competition: " + competition.titre())
 
         if not self.story:
             # For the first page
@@ -220,14 +221,14 @@ class DocTemplate(BaseDocTemplate):
             self.story.append(NextPageTemplate(competition))
             self.story.append(PageBreak())
 
-        if competition.niveau in header_table_style:
-            table_style = header_table_style[competition.niveau]
+        if competition.departemental():
+            table_style = header_table_style["Départemental"]
         else:
             table_style = header_table_style["Régional"]
 
-        table_data = [[competition.nom], [competition.type]]
-        table = Table(table_data, [self.page_width], 2 * [cm], style=table_style)
-        table.link_object = (competition, competition.nom)
+        table_data = [[competition.titre()], [competition.type], [competition.date_str()]]
+        table = Table(table_data, [self.page_width], [cm, 0.5*cm, 0.5*cm], style=table_style)
+        table.link_object = (competition, competition.titre())
         self.story.append(table)
 
         if competition.reunions:
@@ -246,11 +247,12 @@ class DocTemplate(BaseDocTemplate):
         table_style = header_table_style["Content"]
         table_data = [["Club", "Officiels", "Points"]]
         off_per_club = reunion.officiels_per_club()
-        total_participations = 0
+        total_participations, total_engagements = 0, 0
         for club, num in sorted(reunion.participations.items(), key=lambda c: c[0].nom):
             total_participations += num
-            if reunion.competition.par_equipe:
-                participations = "{} équipes".format(num // reunion.competition.par_equipe)
+            total_engagements += reunion.engagements.get(club, 0)
+            if reunion.competition.par_equipe != 0:
+                participations = "{} équipes".format(num)
             else:
                 participations = "{} participations".format(num)
 
@@ -263,12 +265,18 @@ class DocTemplate(BaseDocTemplate):
             else:
                 print("No details")
 
-            officiels = "\n".join(sorted(["{}: {} {}".format(str(off.get_level()), off.prenom, off.nom)
-                                  for off in off_per_club.get(club, [])]))
-            table_data.append([club.nom + "\n" + participations, officiels, paragraph_points])
+            officiels = []
+            for off in sorted(off_per_club.get(club, []), key=lambda o: o.nom):
+                officiels.append("{}: {} {}".format(str(off.get_level()), off.prenom, off.nom))
+                if not off.valid:
+                    officiels[-1] = "<strike>{}</strike>".format(officiels[-1])
+            paragraph_officiels = Paragraph("<br/>".join(officiels), sNormal)
+
+            table_data.append([club.nom + "\n" + participations, paragraph_officiels, paragraph_points])
 
         self.story.append(Table(table_data, 3 * [self.page_width / 3.0], style=table_style))
         self.story.append(Paragraph("<br/>Total des participations: {}".format(total_participations), sNormal))
+        self.story.append(Paragraph("Total des engagements: {}".format(total_engagements), sNormal))
 
     def build(self):
         """

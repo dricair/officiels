@@ -10,17 +10,17 @@
 
 import argparse
 import datetime
-import pandas
+import pandas as pd
 import xlrd.biffh
 import zipfile
 import tempfile
 import xml.etree.ElementTree
 import copy
+import os.path
+import re
 
 import logging
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)-9s %(lineno)-4s %(message)s")
-
-import gen_pdf
+logging.basicConfig(level=logging.INFO, format="%(levelname)-9s %(lineno)-4s %(message)s")
 
 
 class OfficielException(Exception):
@@ -76,9 +76,9 @@ class Officiel:
         self.prenom = prenom
         self.club = club
         self.index = index
-        self.niveau = niveau
+        self.niveau = copy.deepcopy(niveau)
         self.poste = None
-        self.valid = niveau.valeur > 0 # 0 = Seulement licencié
+        self.valid = niveau.valeur > 0  # 0 = Seulement licencié
 
     def set_poste(self, poste):
         """
@@ -86,6 +86,7 @@ class Officiel:
         """
         self.poste = poste
         if poste.niveau > self.niveau:
+            logging.warning("{}: niveau modifié à {} (poste {})".format(str(self), str(poste.niveau), str(poste)))
             self.niveau = poste.niveau
 
     def get_level(self):
@@ -111,6 +112,8 @@ class Configuration:
         self.niveaux = {}
         self.type_competitions = {}
         self.niveau_competitions = {}
+        self.nages = {}
+        self.disqualifications = {}
         self.reunions = []
         self.filename = filename
 
@@ -150,6 +153,33 @@ class Configuration:
                               .format(row["Description"], niveau))
             self.type_competitions[index] = (row["Description"], self.niveau_competitions[niveau])
 
+        nages = ["Nage Libre", "Dos", "Brasse", "Papillon", "4 Nages"]
+        for index, row in self.read_sheet("Nages", ["Nage"], 0).iterrows():
+            nage = None
+            for n in nages:
+                if n.lower() in row["Nage"].lower():
+                    nage = n
+                    break
+
+            if nage is None:
+                logging.error("Nage non trouvée dans {}".format(row["Nage"]))
+
+            self.nages[index] = row["Nage"], nage
+
+        r = re.compile("DSQr(\d+)")
+        for index, row in self.read_sheet("Disqualifications", ["Code", "Libellé"], 0).iterrows():
+            code = row["Code"]
+            m = r.match(code)
+            relayeur = None
+            if m is not None:
+                relayeur = int(m.group(1))
+                code = r.sub("DSQ", code)
+
+            self.disqualifications[index] = (code, row["Libellé"], relayeur)
+
+
+
+
     def read_sheet(self, sheet_name, columns, index_col=None):
         """
         Read sheet of given name in file and checks that the colums are as expected.
@@ -164,7 +194,7 @@ class Configuration:
         :rtype: DataFrame
         """
         try:
-            sheet = pandas.read_excel(self.filename, sheetname=sheet_name, convert_dates=True, index_col=index_col)
+            sheet = pd.read_excel(self.filename, sheetname=sheet_name, convert_dates=True, index_col=index_col)
         except xlrd.biffh.XLRDError:
             raise OfficielException("Pas de feuille '{}' trouvée".format(sheet_name))
 
@@ -221,7 +251,7 @@ class Competition:
         self.startdate = datetime.datetime.strptime(competition.attrib["startdate"], "%Y-%m-%d")
         self.stopdate = datetime.datetime.strptime(competition.attrib["stopdate"], "%Y-%m-%d")
         self.ville = competition.attrib["city"]
-        self.par_equipe = 4 if competition.attrib.get("byteam", "false") else 0
+        self.par_equipe = True if competition.attrib.get("byteam", "false") == "true" else 0
         self.type, self.niveau = conf.type_competitions[int(competition.attrib["typeid"])]
         self.clubs = []
 
@@ -234,7 +264,7 @@ class Competition:
             index, clubid, gradeid = int(o.attrib["id"]), int(o.attrib["clubid"]), int(o.attrib["gradeid"])
             club = self.conf.clubs.get(clubid, None)
             niveau = self.conf.niveaux.get(gradeid, None)
-            if club:
+            if club is not None:
                 officiels[index] = Officiel(index=index, nom=o.attrib["lastname"], prenom=o.attrib["firstname"],
                                             club=club, niveau=niveau)
                 logging.debug("Officiel trouvé: {}".format(str(officiels[index])))
@@ -249,7 +279,7 @@ class Competition:
             index, clubid = int(n.attrib["id"]), int(n.attrib["clubid"])
             club = self.conf.clubs.get(clubid, None)
             nageurs[index] = club
-            if club not in self.clubs:
+            if club is not None and club not in self.clubs:
                 self.clubs.append(club)
 
         # List of sessions
@@ -262,6 +292,10 @@ class Competition:
                 if event.attrib["type"] == "RACE":
                     race_found = True
                     races[event.attrib["raceid"]] = reunion
+
+            reunion.participations = {club: 0 for club in self.clubs}
+            reunion.participants = {club: [] for club in self.clubs}
+            reunion.engagements = {club: 0 for club in self.clubs}
 
             if race_found:
                 self.reunions.append(reunion)
@@ -284,26 +318,61 @@ class Competition:
             else:
                 logging.debug("Session {} ignorée: pas suffisamment d'events".format(session.attrib["number"]))
 
+        # Size of teams
+        if self.par_equipe is True:
+            for result in competition.find("RESULTS").findall("RESULT"):
+                relay = result.find("RELAY")
+                if relay and relay.find("RELAYPOSITIONS") is not None:
+                    self.par_equipe = len(list(relay.find("RELAYPOSITIONS").findall("RELAYPOSITION")))
+                    break
+
         # Swimmers
         for result in competition.find("RESULTS").findall("RESULT"):
             reunion = races[result.attrib["raceid"]]
             for record in list(result):
-                if record.tag == "SOLO" or record.tag == "RELAY":
-                    if record.tag == "SOLO":
-                        club = nageurs[int(record.attrib["swimmerid"])]
-                    else:
-                        club = nageurs[int(record.find("RELAYPOSITIONS").find("RELAYPOSITION").attrib["swimmerid"])]
+                if record.tag == "SOLO":
+                    if self.par_equipe == 0:
+                        nageurid = int(record.attrib["swimmerid"])
+                        club = nageurs[nageurid]
+                        if club is not None:
+                            reunion.participants[club].append(nageurid)
+                            reunion.engagements[club] += 1
+                elif record.tag == "RELAY":
+                    if self.par_equipe == 0:
+                        positions = record.find("RELAYPOSITIONS")
+                        if positions:
+                            for relay_position in positions:
+                                nageurid = int(relay_position.attrib["swimmerid"])
+                                club = nageurs[nageurid]
+                                if club is not None:
+                                    reunion.participants[club].append(nageurid)
+                                    reunion.engagements[club] += 1
 
-                    if club is not None:
-                        if club not in reunion.participations:
-                            reunion.participations[club] = 0
-                        reunion.participations[club] += 1
+                    else:
+                        club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
+                        if club is not None:
+                            reunion.participants[club].append(int(result.attrib["team"]))
+                            reunion.engagements[club] += 1
+
                 elif record.tag == "SPLIT":
                     pass
+
+        # Counts number of participations per club
+        for reunion in self.reunions:
+            for club, l in reunion.participants.items():
+                reunion.participations[club] = len(set(l))
 
         # Update list of competitions for each club
         for club in self.clubs:
             club.competitions.append(self)
+
+    def titre(self):
+        """
+        Return the Title as a string
+        :return: Title
+        :rtype: string
+        """
+        return "{} - {}".format(self.nom, self.ville)
 
     def date_str(self):
         """
@@ -337,7 +406,9 @@ class Reunion:
         self.competition = competition
         self.titre = "Réunion N°{}".format(index)
         self.officiels = {}
-        self.participations = {}
+        self.participants = None
+        self.participations = None
+        self.engagements = None
         self._officiels_per_club = None
         self.pts = {}
         self.details = {}
@@ -378,7 +449,6 @@ class Reunion:
 
         # needed = (Num of A/B, Total num)
         if self.competition.par_equipe:
-            participations = participations // self.competition.par_equipe
             if participations <= 1:
                 needed = (participations, participations)
             else:
@@ -403,9 +473,13 @@ class Reunion:
         num_ab, num = 0, 0
         club_officiels = self.officiels_per_club().get(club, [])
         for officiel in club_officiels:
-            if not officiel.valid and self.competition.departemental():
-                logging.warning("L'officiel {} n'est pas valide et est ignoré".format(str(officiel)))
-                continue
+            if not officiel.valid:
+                if self.competition.departemental():
+                    logging.warning("L'officiel {} n'est pas valide et est ignoré".format(str(officiel)))
+                    continue
+                else:
+                    # Régional: all officials
+                    officiel.valid = True
             num += 1
             if officiel.get_level() > conf.niveau_c:
                 num_ab += 1
@@ -440,25 +514,44 @@ class Reunion:
         return "C{}_R{}".format(self.competition.id, self.index)
 
 if __name__ == "__main__":
+    import gen_pdf
+
     parser = argparse.ArgumentParser(description='Liste des compétitions')
     parser.add_argument("--conf", default="Officiels.xlsx", help="Fichier de configuration")
+    parser.add_argument("--plot", default=False, action="store_true", help="Ajout des graphiques")
+    parser.add_argument("ffnex_files", metavar="fichiers", nargs="+", help="Liste des fichiers ou répertoires " +
+                                                                           "à analyser")
 
     args = parser.parse_args()
 
-    conf = Configuration('Officiels.xlsx')
+    conf = Configuration(args.conf)
 
-    competitions = [Competition(conf, "2015-2016/ffnex_resultats_complets_20151205_antibes_35303.zip")]
-    print(str(competitions[0]))
+    competitions = []
+    ffnex_files = []
+    for f in args.ffnex_files:
+        if os.path.isdir(f):
+            ffnex_files += [os.path.join(f, file) for file in os.listdir(f) if os.path.isfile(os.path.join(f, file))]
+        else:
+            ffnex_files.append(f)
 
-    points = {"Départemental": {"participations": 0, "total_bonus": 0},
-              "Régional":      {"participations": 0, "total_bonus": 0}}
+    ffnex_files.sort()
+
+    for f in ffnex_files:
+        competitions.append(Competition(conf, f))
+
+    points = {"Départemental": {"participations": 0, "engagements": 0, "total_bonus": 0},
+              "Régional":      {"participations": 0, "engagements": 0, "total_bonus": 0}}
+
+    points_df = []
 
     doc = gen_pdf.DocTemplate(conf, "Compétitions.pdf", "Liste des compétitions", "Cédric Airaud")
     for competition in competitions:
         if competition.departemental():
-            l = points["Départemental"]
+            niveau = "Départemental"
         else:
-            l = points["Régional"]
+            niveau = "Régional"
+
+        l = points[niveau]
 
         for club in competition.clubs:
             if club not in l:
@@ -467,21 +560,34 @@ if __name__ == "__main__":
         for reunion in competition.reunions:
             for club in reunion.participations.keys():
                 pts = reunion.points(club, details=[])
-                l["participations"] += reunion.participations.get(club, 0)
+                participations = reunion.participations.get(club, 0)
+                engagements = reunion.engagements.get(club, 0)
+                num_officiels = len(reunion.officiels_per_club().get(club, []))
+
+                l["participations"] += participations
+                l["engagements"] += engagements
                 if pts > 0:
                     l["total_bonus"] += pts
                 l[club] += pts
 
-    doc.bonus = {level: 0.50 * l["participations"] / l["total_bonus"] if l["total_bonus"] else 0
+                points_df.append({"Niveau": niveau, "Equipe": competition.par_equipe != 0,
+                                  "Compétition": competition.titre(), "Date": competition.startdate,
+                                  "Réunion": reunion.index, "Club": club.nom, "Participations": participations,
+                                  "Engagements": engagements, "Points": pts, "Officiels": num_officiels})
+
+    points_df = pd.DataFrame(points_df)
+    points_df.to_excel("export.xlsx", sheet_name="Points")
+
+    doc.bonus = {level: 0.50 * l["engagements"] / l["total_bonus"] if l["total_bonus"] else 0
                  for level, l in points.items()}
     for level, value in doc.bonus.items():
-        logging.info("Valeur du point bonus: {} € (Total participations: {}, total bonus: {})"
-                     .format(value, points[level]["participations"], points[level]["total_bonus"]))
+        logging.info("Valeur du point bonus pour {}: {:.2f} € (Total engagements: {}, total bonus: {:.2f})"
+                     .format(level, value, points[level]["engagements"], points[level]["total_bonus"]))
 
     for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
         doc.new_club(club)
 
-    for competition in competitions:
+    for competition in sorted(competitions, key=lambda x: x.startdate):
         doc.new_competition(competition)
 
     doc.build()
