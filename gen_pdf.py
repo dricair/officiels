@@ -14,12 +14,13 @@ import datetime
 from reportlab.platypus import BaseDocTemplate, PageTemplate, NextPageTemplate, PageBreak, Frame
 from reportlab.platypus import Paragraph, Table, TableStyle
 from reportlab.platypus.flowables import ListItem, ListFlowable
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont, TTFError
+from reportlab.lib.colors import darkblue
 
 from officiels import Club, Competition
 
@@ -151,6 +152,7 @@ class DocTemplate(BaseDocTemplate):
         self.page_width = self.pageTemplates[0].page_width
         self.club_seen = 0
         self.competition_seen = False
+        self.bonus = None
 
     def new_club(self, club):
         """
@@ -192,7 +194,7 @@ class DocTemplate(BaseDocTemplate):
                 for reunion in competition.reunions:
                     pts = reunion.points(club)
                     total += pts
-                    row[1].append(Paragraph(reunion.titre, sNormal))
+                    row[1].append(Paragraph("<a href='#{}'>{}</a>".format(reunion.link(), reunion.titre), sNormal))
                     row[2].append(Paragraph("{} points".format(pts), sNormal))
                 table_data.append(row)
 
@@ -226,10 +228,14 @@ class DocTemplate(BaseDocTemplate):
         else:
             table_style = header_table_style["Régional"]
 
-        table_data = [[competition.titre()], [competition.type], [competition.date_str()]]
+        table_data = [[competition.titre()],
+                      [competition.type],
+                      [competition.date_str()]]
         table = Table(table_data, [self.page_width], [cm, 0.5*cm, 0.5*cm], style=table_style)
         table.link_object = (competition, competition.titre())
         self.story.append(table)
+        self.story.append(Paragraph("Lien WebFFN: <a href='{}'>{}</a>"
+                                    .format(competition.weblink(), competition.weblink()), sNormal))
 
         if competition.reunions:
             for reunion in competition.reunions:
@@ -249,12 +255,13 @@ class DocTemplate(BaseDocTemplate):
         off_per_club = reunion.officiels_per_club()
         total_participations, total_engagements = 0, 0
         for club, num in sorted(reunion.participations.items(), key=lambda c: c[0].nom):
+            club_nom = Paragraph("<a href='#{}'>{}</a>".format(club.link(), club.nom), sNormal)
             total_participations += num
             total_engagements += reunion.engagements.get(club, 0)
             if reunion.competition.par_equipe != 0:
-                participations = "{} équipes".format(num)
+                participations = Paragraph("{} équipes".format(num), sNormal)
             else:
-                participations = "{} participations".format(num)
+                participations = Paragraph("{} participations".format(num), sNormal)
 
             details = []
             points = reunion.points(club, details)
@@ -272,7 +279,7 @@ class DocTemplate(BaseDocTemplate):
                     officiels[-1] = "<strike>{}</strike>".format(officiels[-1])
             paragraph_officiels = Paragraph("<br/>".join(officiels), sNormal)
 
-            table_data.append([club.nom + "\n" + participations, paragraph_officiels, paragraph_points])
+            table_data.append([[club_nom, participations], paragraph_officiels, paragraph_points])
 
         self.story.append(Table(table_data, 3 * [self.page_width / 3.0], style=table_style))
         self.story.append(Paragraph("<br/>Total des participations: {}".format(total_participations), sNormal))

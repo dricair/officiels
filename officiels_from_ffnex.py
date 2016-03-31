@@ -85,7 +85,7 @@ class Officiel:
         Set the poste. If required level is more than officiel level, change the level
         """
         self.poste = poste
-        if poste.niveau > self.niveau:
+        if self.valid and poste.niveau > self.niveau:
             logging.warning("{}: niveau modifié à {} (poste {})".format(str(self), str(poste.niveau), str(poste)))
             self.niveau = poste.niveau
 
@@ -176,9 +176,6 @@ class Configuration:
                 code = r.sub("DSQ", code)
 
             self.disqualifications[index] = (code, row["Libellé"], relayeur)
-
-
-
 
     def read_sheet(self, sheet_name, columns, index_col=None):
         """
@@ -322,21 +319,23 @@ class Competition:
         if self.par_equipe is True:
             for result in competition.find("RESULTS").findall("RESULT"):
                 relay = result.find("RELAY")
-                if relay and relay.find("RELAYPOSITIONS") is not None:
+                if relay and result.attrib["disqualificationid"] != "0" and relay.find("RELAYPOSITIONS") is not None:
                     self.par_equipe = len(list(relay.find("RELAYPOSITIONS").findall("RELAYPOSITION")))
                     break
+
+            if self.par_equipe == 0:
+                logging.error("Taille d'équipe non trouvée")
 
         # Swimmers
         for result in competition.find("RESULTS").findall("RESULT"):
             reunion = races[result.attrib["raceid"]]
             for record in list(result):
                 if record.tag == "SOLO":
-                    if self.par_equipe == 0:
-                        nageurid = int(record.attrib["swimmerid"])
-                        club = nageurs[nageurid]
-                        if club is not None:
-                            reunion.participants[club].append(nageurid)
-                            reunion.engagements[club] += 1
+                    nageurid = int(record.attrib["swimmerid"])
+                    club = nageurs[nageurid]
+                    if club is not None:
+                        reunion.participants[club].append(nageurid)
+                        reunion.engagements[club] += 1
                 elif record.tag == "RELAY":
                     if self.par_equipe == 0:
                         positions = record.find("RELAYPOSITIONS")
@@ -352,7 +351,7 @@ class Competition:
                         club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
                         if club is not None:
                             reunion.participants[club].append(int(result.attrib["team"]))
-                            reunion.engagements[club] += 1
+                            reunion.engagements[club] += self.par_equipe
 
                 elif record.tag == "SPLIT":
                     pass
@@ -361,6 +360,9 @@ class Competition:
         for reunion in self.reunions:
             for club, l in reunion.participants.items():
                 reunion.participations[club] = len(set(l))
+                if self.par_equipe:
+                    reunion.participations[club] = ((reunion.participations[club] + self.par_equipe - 1) //
+                                                    self.par_equipe)
 
         # Update list of competitions for each club
         for club in self.clubs:
@@ -395,6 +397,9 @@ class Competition:
 
     def link(self):
         return "C{}".format(self.id)
+
+    def weblink(self):
+        return "http://ffn.extranat.fr/webffn/resultats.php?idact=nat&idcpt={}".format(self.id)
 
 
 class Reunion:
@@ -519,14 +524,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Liste des compétitions')
     parser.add_argument("--conf", default="Officiels.xlsx", help="Fichier de configuration")
     parser.add_argument("--plot", default=False, action="store_true", help="Ajout des graphiques")
+    parser.add_argument("--extract", default=False, action="store_true", help="Extrait le fichier ZIP en XML")
+    parser.add_argument("--output", default="Compétitions.pdf", help="Fichier PDF de sortie")
     parser.add_argument("ffnex_files", metavar="fichiers", nargs="+", help="Liste des fichiers ou répertoires " +
                                                                            "à analyser")
 
     args = parser.parse_args()
 
+    competitions = []
     conf = Configuration(args.conf)
 
-    competitions = []
     ffnex_files = []
     for f in args.ffnex_files:
         if os.path.isdir(f):
@@ -534,7 +541,37 @@ if __name__ == "__main__":
         else:
             ffnex_files.append(f)
 
+    ffnex_files = [f for f in ffnex_files if os.path.splitext(f)[1] in (".zip", ".xml")]
     ffnex_files.sort()
+
+    if args.extract:
+        import xml.dom.minidom
+        for f in ffnex_files:
+            logging.info("Extraction du fichier {}".format(f))
+            output_file = os.path.splitext(f)[0] + ".xml"
+            backup_file = f + ".bak"
+            filename = None
+            try:
+                if zipfile.is_zipfile(f):
+                    z = zipfile.ZipFile(f, 'r')
+                    if "ffnex.xml" not in z.namelist():
+                        logging.error("Le fichier {} devrait contenir un fichier ffnex.xml")
+                    else:
+                        filename = z.extract('ffnex.xml', tempfile.gettempdir())
+                    z.close()
+
+                logging.debug("Fichier de sortie {}".format(output_file))
+                data = xml.dom.minidom.parse(filename)
+                with open(output_file, "w+") as of:
+                    of.write(data.toprettyxml())
+
+                logging.debug("Fichier de sauvegarde {}".format(backup_file))
+                os.rename(f, backup_file)
+
+            except zipfile.BadZipfile:
+                logging.error("Le fichier {} ne peut pas être lu correctement".format(filename))
+
+        exit(0)
 
     for f in ffnex_files:
         competitions.append(Competition(conf, f))
@@ -544,7 +581,8 @@ if __name__ == "__main__":
 
     points_df = []
 
-    doc = gen_pdf.DocTemplate(conf, "Compétitions.pdf", "Liste des compétitions", "Cédric Airaud")
+    logging.info("Génération du fichier PDF {}".format(args.output))
+    doc = gen_pdf.DocTemplate(conf, args.output, "Liste des compétitions", "Cédric Airaud")
     for competition in competitions:
         if competition.departemental():
             niveau = "Départemental"
