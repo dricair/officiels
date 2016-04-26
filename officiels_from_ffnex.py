@@ -86,8 +86,7 @@ class Officiel:
         """
         self.poste = poste
         if self.valid and poste.niveau > self.niveau:
-            logging.warning("{}: niveau modifié à {} (poste {})".format(str(self), str(poste.niveau), str(poste)))
-            self.niveau = poste.niveau
+            logging.warning("{}: le poste {} requiert un niveau {}".format(str(self), str(poste), str(poste.niveau)))
 
     def get_level(self):
         return self.niveau
@@ -164,7 +163,16 @@ class Configuration:
             if nage is None:
                 logging.error("Nage non trouvée dans {}".format(row["Nage"]))
 
-            self.nages[index] = row["Nage"], nage
+            if "messieurs" in row["Nage"].lower():
+                sexe = "H"
+            elif "dame" in row["Nage"].lower():
+                sexe = "D"
+            elif "mixte" in row["Nage"].lower():
+                sexe = "M"
+            else:
+                logging.error("Sexe non trouvé dans {}".format(row["Nage"]))
+
+            self.nages[index] = row["Nage"], nage, sexe
 
         r = re.compile("DSQr(\d+)")
         for index, row in self.read_sheet("Disqualifications", ["Code", "Libellé"], 0).iterrows():
@@ -330,28 +338,30 @@ class Competition:
         for result in competition.find("RESULTS").findall("RESULT"):
             reunion = races[result.attrib["raceid"]]
             for record in list(result):
-                if record.tag == "SOLO":
+                if self.par_equipe != 0:
+                    club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
+                    team = int(result.attrib["team"])
+                    sexe = conf.nages[int(result.attrib["raceid"])][2]
+                    if club is not None:
+                        reunion.participants[club].append("{} {}".format(team, sexe))
+                        reunion.engagements[club] += self.par_equipe
+
+                elif record.tag == "SOLO":
                     nageurid = int(record.attrib["swimmerid"])
                     club = nageurs[nageurid]
                     if club is not None:
                         reunion.participants[club].append(nageurid)
                         reunion.engagements[club] += 1
-                elif record.tag == "RELAY":
-                    if self.par_equipe == 0:
-                        positions = record.find("RELAYPOSITIONS")
-                        if positions:
-                            for relay_position in positions:
-                                nageurid = int(relay_position.attrib["swimmerid"])
-                                club = nageurs[nageurid]
-                                if club is not None:
-                                    reunion.participants[club].append(nageurid)
-                                    reunion.engagements[club] += 1
 
-                    else:
-                        club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
-                        if club is not None:
-                            reunion.participants[club].append(int(result.attrib["team"]))
-                            reunion.engagements[club] += self.par_equipe
+                elif record.tag == "RELAY":
+                    positions = record.find("RELAYPOSITIONS")
+                    if positions:
+                        for relay_position in positions:
+                            nageurid = int(relay_position.attrib["swimmerid"])
+                            club = nageurs[nageurid]
+                            if club is not None:
+                                reunion.participants[club].append(nageurid)
+                                reunion.engagements[club] += 1
 
                 elif record.tag == "SPLIT":
                     pass
@@ -359,10 +369,8 @@ class Competition:
         # Counts number of participations per club
         for reunion in self.reunions:
             for club, l in reunion.participants.items():
-                reunion.participations[club] = len(set(l))
                 if self.par_equipe:
-                    reunion.participations[club] = ((reunion.participations[club] + self.par_equipe - 1) //
-                                                    self.par_equipe)
+                    reunion.participations[club] = len(set(l))
 
         # Update list of competitions for each club
         for club in self.clubs:

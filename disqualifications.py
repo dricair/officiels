@@ -107,7 +107,7 @@ def get_disqualifications(filename, conf):
         if reason in ("DNS exc", "DNS dec", "DNS Nd", "DSQ", "DNS", "FD", "DNF", "EPR Supp"):
             continue
 
-        race, nage = conf.nages[int(r.attrib["raceid"])]
+        race, nage, sexe = conf.nages[int(r.attrib["raceid"])]
 
         heat, lane = int(r.attrib["heat"]), int(r.attrib["lane"])
 
