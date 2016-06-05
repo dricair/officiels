@@ -624,7 +624,8 @@ if __name__ == "__main__":
                 pts = reunion.points(club, details=[])
                 participations = reunion.participations.get(club, 0)
                 engagements = reunion.engagements.get(club, 0)
-                num_officiels = len(reunion.officiels_per_club().get(club, []))
+                officiels = reunion.officiels_per_club().get(club, [])
+                num_officiels = len([o for o in officiels if o.valid])
 
                 l["participations"] += participations
                 l["engagements"] += engagements
