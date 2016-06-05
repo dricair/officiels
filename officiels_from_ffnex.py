@@ -542,12 +542,19 @@ if __name__ == "__main__":
     competitions = []
     conf = Configuration(args.conf)
 
-    ffnex_files = []
+    files = []
     for f in args.ffnex_files:
         if os.path.isdir(f):
-            ffnex_files += [os.path.join(f, file) for file in os.listdir(f) if os.path.isfile(os.path.join(f, file))]
+            files += [os.path.join(f, file) for file in os.listdir(f) if os.path.isfile(os.path.join(f, file))]
         else:
-            ffnex_files.append(f)
+            files.append(f)
+
+    ffnex_files = [f for f in files if os.path.splitext(f)[1] == ".xml"]
+    for f in [f for f in files if os.path.splitext(f)[1] == ".zip"]:
+      if os.path.splitext(f)[0] + ".xml" in ffnex_files:
+        logging.info("Fichier {} ignoré car déjà présent en .xml".format(f))
+      else:
+        ffnex_files.append(f)
 
     ffnex_files = [f for f in ffnex_files if os.path.splitext(f)[1] in (".zip", ".xml")]
     ffnex_files.sort()
@@ -583,6 +590,15 @@ if __name__ == "__main__":
 
     for f in ffnex_files:
         competitions.append(Competition(conf, f))
+
+    competition_ids = sorted([competition.id for competition in competitions])
+    if len(competitions) != len(set(competition_ids)):
+      duplicates = []
+      for i in range(1, len(competition_ids)):
+        if competition_ids[i] == competition_ids[i-1]:
+          duplicates.append(competition_ids[i])
+      logging.fatal("Des compétitions sont dupliquées: {}".format(", ".join(map(str, duplicates))))
+      exit(-1)
 
     points = {"Départemental": {"participations": 0, "engagements": 0, "total_bonus": 0},
               "Régional":      {"participations": 0, "engagements": 0, "total_bonus": 0}}
