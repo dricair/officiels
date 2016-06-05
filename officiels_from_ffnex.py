@@ -344,7 +344,6 @@ class Competition:
                     sexe = conf.nages[int(result.attrib["raceid"])][2]
                     if club is not None:
                         reunion.participants[club].append("{} {}".format(team, sexe))
-                        reunion.engagements[club] += self.par_equipe
 
                 elif record.tag == "SOLO":
                     nageurid = int(record.attrib["swimmerid"])
@@ -369,8 +368,9 @@ class Competition:
         # Counts number of participations per club
         for reunion in self.reunions:
             for club, l in reunion.participants.items():
-                if self.par_equipe:
-                    reunion.participations[club] = len(set(l))
+                reunion.participations[club] = len(set(l))
+                if self.par_equipe != 0:
+                    reunion.engagements[club] = reunion.participations[club] * self.par_equipe
 
         # Update list of competitions for each club
         for club in self.clubs:
