@@ -208,6 +208,26 @@ class DocTemplate(BaseDocTemplate):
                 self.story.append(Paragraph("Valeur du bonus (Estimation): {:.2f} €"
                                             .format(total * bonus), sNormal))
 
+    def competition_header(self, competition):
+        """
+        Add header for the competition
+        :param competition: New competition
+        :type competition: Competition
+        """
+        if competition.departemental():
+            table_style = header_table_style["Départemental"]
+        else:
+            table_style = header_table_style["Régional"]
+
+        table_data = [[competition.titre()],
+                      [competition.type],
+                      [competition.date_str()]]
+        table = Table(table_data, [self.page_width], [cm, 0.5 * cm, 0.5 * cm], style=table_style)
+        table.link_object = (competition, competition.titre())
+        self.story.append(table)
+        self.story.append(Paragraph("Lien WebFFN: <a href='{}'>{}</a>"
+                                    .format(competition.weblink(), competition.weblink()), sNormal))
+
     def new_competition(self, competition):
         """
         Add a competition on a new page
@@ -223,25 +243,20 @@ class DocTemplate(BaseDocTemplate):
             self.story.append(NextPageTemplate(competition))
             self.story.append(PageBreak())
 
-        if competition.departemental():
-            table_style = header_table_style["Départemental"]
-        else:
-            table_style = header_table_style["Régional"]
-
-        table_data = [[competition.titre()],
-                      [competition.type],
-                      [competition.date_str()]]
-        table = Table(table_data, [self.page_width], [cm, 0.5*cm, 0.5*cm], style=table_style)
-        table.link_object = (competition, competition.titre())
-        self.story.append(table)
-        self.story.append(Paragraph("Lien WebFFN: <a href='{}'>{}</a>"
-                                    .format(competition.weblink(), competition.weblink()), sNormal))
+        self.competition_header(competition)
+        for c in competition.linked:
+            self.competition_header(c)
 
         if competition.reunions:
             for reunion in competition.reunions:
                 self.new_reunion(reunion)
         else:
             self.story.append(Paragraph("Pas de résultats trouvés pour cette compétition", sNormal))
+
+    def reunion_link(self, reunion, titre):
+        p = Paragraph(reunion.titre, styles["h2"])
+        p.link_object = (reunion, titre)
+        self.story.append(p)
 
     def new_reunion(self, reunion):
         logging.debug("New reunion: " + reunion.titre)

@@ -226,6 +226,8 @@ class Competition:
         self.conf = conf
         self.filename = filename
         self.reunions = []
+        self.competition_link = None # Link from this competition to another one
+        self.linked = [] # List of competitions linked to it
 
         try:
             if zipfile.is_zipfile(filename):
@@ -261,7 +263,14 @@ class Competition:
         self.clubs = []
 
         logging.info("Lecture de la compétition {} ({}) - {} à {} - {}".format(self.nom, self.id,
-                     self.date_str(), self.ville, self.niveau))
+                                                                               self.date_str(), self.ville,
+                                                                               self.niveau))
+
+        # Competition can be linked to another one: jury is ignored but number of participations are added
+        link = competition.find("LINK")
+        if link is not None:
+            self.competition_link = int(link.attrib["rel"])
+            logging.info("Compétition liée à la compétition {}".format(self.competition_link))
 
         # List of officials
         officiels = {}
@@ -524,7 +533,10 @@ class Reunion:
         return pts
 
     def link(self):
-        return "C{}_R{}".format(self.competition.id, self.index)
+        competition_id = self.competition.id
+        if self.competition.competition_link is not None:
+            competition_id = self.competition.competition_link.id
+        return "C{}_R{}".format(competition_id, self.index)
 
 if __name__ == "__main__":
     import gen_pdf
@@ -551,10 +563,10 @@ if __name__ == "__main__":
 
     ffnex_files = [f for f in files if os.path.splitext(f)[1] == ".xml"]
     for f in [f for f in files if os.path.splitext(f)[1] == ".zip"]:
-      if os.path.splitext(f)[0] + ".xml" in ffnex_files:
-        logging.info("Fichier {} ignoré car déjà présent en .xml".format(f))
-      else:
-        ffnex_files.append(f)
+        if os.path.splitext(f)[0] + ".xml" in ffnex_files:
+            logging.info("Fichier {} ignoré car déjà présent en .xml".format(f))
+        else:
+            ffnex_files.append(f)
 
     ffnex_files = [f for f in ffnex_files if os.path.splitext(f)[1] in (".zip", ".xml")]
     ffnex_files.sort()
@@ -591,14 +603,38 @@ if __name__ == "__main__":
     for f in ffnex_files:
         competitions.append(Competition(conf, f))
 
-    competition_ids = sorted([competition.id for competition in competitions])
+    competitions_by_id = {competition.id: competition for competition in competitions}
+    competition_ids = sorted(competitions_by_id.keys())
     if len(competitions) != len(set(competition_ids)):
-      duplicates = []
-      for i in range(1, len(competition_ids)):
-        if competition_ids[i] == competition_ids[i-1]:
-          duplicates.append(competition_ids[i])
-      logging.fatal("Des compétitions sont dupliquées: {}".format(", ".join(map(str, duplicates))))
-      exit(-1)
+        duplicates = []
+        for i in range(1, len(competition_ids)):
+            if competition_ids[i] == competition_ids[i-1]:
+                duplicates.append(competition_ids[i])
+        logging.fatal("Des compétitions sont dupliquées: {}".format(", ".join(map(str, duplicates))))
+        exit(-1)
+
+    # Create links: linked competitions are removed from the list
+    link_list = [competition for competition in competitions if competition.competition_link is not None]
+    for competition in link_list:
+        master = competitions_by_id[competition.competition_link]
+        master.linked.append(competition)
+        competitions.remove(competition)
+        competition.competition_link = master
+
+        # Add participations
+        if len(competition.reunions) != len(master.reunions):
+            logging.fatal("La compétition {} est liée à la compétition {} mais elles n'ont pas le même nombre de"
+                          "réunions".format(competition.id, master.id))
+            exit(-1)
+
+        for i, creunion in enumerate(competition.reunions):
+            mreunion = master.reunions[i]
+
+            for club in set(list(creunion.participations.keys()) + list(mreunion.participations.keys())):
+                mreunion.participations[club] = mreunion.participations.get(club,0) + creunion.participations.get(club,0)
+
+            for club in set(list(creunion.engagements.keys()) + list(mreunion.engagements.keys())):
+                mreunion.engagements[club] = mreunion.engagements.get(club, 0) + creunion.engagements.get(club, 0)
 
     points = {"Départemental": {"participations": 0, "engagements": 0, "total_bonus": 0},
               "Régional":      {"participations": 0, "engagements": 0, "total_bonus": 0}}
