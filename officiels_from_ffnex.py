@@ -297,6 +297,9 @@ class Competition:
                 self.clubs.append(club)
 
         # List of sessions
+        def race_id(item):
+            return "{}_{}".format(item.attrib["raceid"], item.attrib["roundid"])
+
         races = {}
         for session in competition.find("SESSIONS").findall("SESSION"):
             # List of races, with an index to the reunion
@@ -305,7 +308,7 @@ class Competition:
             for event in session.find("EVENTS").findall("EVENT"):
                 if event.attrib["type"] == "RACE":
                     race_found = True
-                    races[event.attrib["raceid"]] = reunion
+                    races[race_id(event)] = reunion
 
             reunion.participations = {club: 0 for club in self.clubs}
             reunion.participants = {club: [] for club in self.clubs}
@@ -345,7 +348,7 @@ class Competition:
 
         # Swimmers
         for result in competition.find("RESULTS").findall("RESULT"):
-            reunion = races[result.attrib["raceid"]]
+            reunion = races[race_id(result)]
             for record in list(result):
                 if self.par_equipe != 0:
                     club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
@@ -472,7 +475,7 @@ class Reunion:
         # needed = (Num of A/B, Total num)
         if self.competition.par_equipe:
             if participations <= 1:
-                needed = (participations, participations)
+                needed = (0, participations)
             else:
                 needed = (1, min(3, participations))
 
