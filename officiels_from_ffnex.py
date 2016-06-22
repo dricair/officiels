@@ -313,6 +313,7 @@ class Competition:
             reunion.participations = {club: 0 for club in self.clubs}
             reunion.participants = {club: [] for club in self.clubs}
             reunion.engagements = {club: 0 for club in self.clubs}
+            reunion.financier = {club: dict(individuel=0, relais=0, equipe=0) for club in self.clubs}
 
             if race_found:
                 self.reunions.append(reunion)
@@ -363,16 +364,20 @@ class Competition:
                     if club is not None:
                         reunion.participants[club].append(nageurid)
                         reunion.engagements[club] += 1
+                        reunion.financier[club]["individuel"] += 1
 
                 elif record.tag == "RELAY":
                     positions = record.find("RELAYPOSITIONS")
                     if positions:
+                        club = None
                         for relay_position in positions:
                             nageurid = int(relay_position.attrib["swimmerid"])
                             club = nageurs[nageurid]
                             if club is not None:
                                 reunion.participants[club].append(nageurid)
                                 reunion.engagements[club] += 1
+                        if club is not None:
+                            reunion.financier[club]["relais"] += 1
 
                 elif record.tag == "SPLIT":
                     pass
@@ -383,6 +388,7 @@ class Competition:
                 reunion.participations[club] = len(set(l))
                 if self.par_equipe != 0:
                     reunion.engagements[club] = reunion.participations[club] * self.par_equipe
+                    reunion.financier[club]["equipe"] += reunion.participations[club]
 
         # Update list of competitions for each club
         for club in self.clubs:
@@ -434,6 +440,7 @@ class Reunion:
         self.participants = None
         self.participations = None
         self.engagements = None
+        self.financier = None
         self._officiels_per_club = None
         self.pts = {}
         self.details = {}
@@ -639,6 +646,10 @@ if __name__ == "__main__":
             for club in set(list(creunion.engagements.keys()) + list(mreunion.engagements.keys())):
                 mreunion.engagements[club] = mreunion.engagements.get(club, 0) + creunion.engagements.get(club, 0)
 
+            for id, officiel in creunion.officiels.items():
+                if id not in mreunion.officiels:
+                    mreunion.officiels[id] = officiel
+
     points = {"Départemental": {"participations": 0, "engagements": 0, "total_bonus": 0},
               "Régional":      {"participations": 0, "engagements": 0, "total_bonus": 0}}
 
@@ -672,13 +683,33 @@ if __name__ == "__main__":
                     l["total_bonus"] += pts
                 l[club] += pts
 
-                points_df.append({"Niveau": niveau, "Equipe": competition.par_equipe != 0,
+                points_df.append({"Niveau": niveau, "Par Equipe": competition.par_equipe != 0,
                                   "Compétition": competition.titre(), "Date": competition.startdate,
                                   "Réunion": reunion.index, "Club": club.nom, "Participations": participations,
-                                  "Engagements": engagements, "Points": pts, "Officiels": num_officiels})
+                                  "Engagements": engagements, "Points": pts, "Officiels": num_officiels,
+                                  "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
+                                  "Relais": reunion.financier.get(club, {}).get("relais", 0),
+                                  "Equipes": reunion.financier.get(club, {}).get("equipe", 0)
+                                  })
+
+    writer = pd.ExcelWriter("export.xlsx")
 
     points_df = pd.DataFrame(points_df)
-    points_df.to_excel("export.xlsx", sheet_name="Points")
+    points_df.to_excel(writer, sheet_name="Points")
+
+    officiels_df = points_df.groupby(['Niveau', 'Club'])['Participations', 'Engagements', 'Officiels'].sum()
+    officiels_df.to_excel(writer, sheet_name="Nombre d'officiels")
+    worksheet = writer.sheets["Nombre d'officiels"]
+
+    points_df["Total"] = points_df["Individuels"] * 3.50 + points_df["Relais"] * 6 + points_df["Equipes"] * 25
+
+    etat_df = points_df.groupby(['Niveau', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total'].sum()
+    etat_df.to_excel(writer, sheet_name="Etat financier")
+    worksheet = writer.sheets["Etat financier"]
+
+    writer.save()
+
+
 
     doc.bonus = {level: 0.50 * l["engagements"] / l["total_bonus"] if l["total_bonus"] else 0
                  for level, l in points.items()}
