@@ -178,19 +178,22 @@ class DocTemplate(BaseDocTemplate):
         for departemental in (True, False):
             total = 0
             if departemental:
-                competitions = [c for c in club.competitions if c.departemental()]
+                competitions = [c for c in club.competitions if c.departemental() and c.competition_link is None]
                 self.story.append(Paragraph("Compétitions départementales", sHeading2))
                 bonus = self.bonus["Départemental"]
             else:
-                competitions = [c for c in club.competitions if not c.departemental()]
+                competitions = [c for c in club.competitions if not c.departemental() and c.competition_link is None]
                 self.story.append(Paragraph("Compétitions régionales et plus", sHeading2))
                 bonus = self.bonus["Régional"]
 
             table_data = [["Compétition", "Réunions", "Points"]]
 
             for competition in sorted(competitions, key=lambda c: c.startdate):
-                row = [Paragraph("{} - {}<br/>{}".format(competition.date_str(), competition.titre(),
-                                                         competition.type), sNormal), [], []]
+                description = [Paragraph("{} - {}".format(competition.date_str(), competition.titre()), sNormal)]
+                for c in competition.linked:
+                    description.append(Paragraph("{} - {}".format(c.date_str(), c.titre()), sNormal))
+
+                row = [description, [], []]
                 for reunion in competition.reunions:
                     pts = reunion.points(club)
                     total += pts

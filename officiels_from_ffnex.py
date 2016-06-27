@@ -628,7 +628,6 @@ if __name__ == "__main__":
     for competition in link_list:
         master = competitions_by_id[competition.competition_link]
         master.linked.append(competition)
-        competitions.remove(competition)
         competition.competition_link = master
 
         # Add participations
@@ -721,6 +720,7 @@ if __name__ == "__main__":
         doc.new_club(club)
 
     for competition in sorted(competitions, key=lambda x: x.startdate):
-        doc.new_competition(competition)
+        if competition.competition_link is None:
+            doc.new_competition(competition)
 
     doc.build()
