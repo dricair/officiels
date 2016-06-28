@@ -340,7 +340,7 @@ class Competition:
         if self.par_equipe is True:
             for result in competition.find("RESULTS").findall("RESULT"):
                 relay = result.find("RELAY")
-                if relay and result.attrib["disqualificationid"] != "0" and relay.find("RELAYPOSITIONS") is not None:
+                if relay and result.attrib["disqualificationid"] == "0" and relay.find("RELAYPOSITIONS") is not None:
                     self.par_equipe = len(list(relay.find("RELAYPOSITIONS").findall("RELAYPOSITION")))
                     break
 
