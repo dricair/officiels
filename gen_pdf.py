@@ -276,7 +276,7 @@ class DocTemplate(BaseDocTemplate):
             club_nom = Paragraph("<a href='#{}'>{}</a>".format(club.link(), club.nom), sNormal)
             total_participations += num
             total_engagements += reunion.engagements.get(club, 0)
-            if reunion.competition.par_equipe != 0:
+            if reunion.competition.par_equipe != 1:
                 participations = Paragraph("{} équipes".format(num), sNormal)
             else:
                 participations = Paragraph("{} participations".format(num), sNormal)

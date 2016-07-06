@@ -11,6 +11,7 @@
 import argparse
 import datetime
 import pandas as pd
+import numpy as np
 import xlrd.biffh
 import zipfile
 import tempfile
@@ -258,9 +259,13 @@ class Competition:
         self.startdate = datetime.datetime.strptime(competition.attrib["startdate"], "%Y-%m-%d")
         self.stopdate = datetime.datetime.strptime(competition.attrib["stopdate"], "%Y-%m-%d")
         self.ville = competition.attrib["city"]
-        self.par_equipe = True if competition.attrib.get("byteam", "false") == "true" else 0
+        self.par_equipe = True if competition.attrib.get("byteam", "false") == "true" else 1
         self.type, self.niveau = conf.type_competitions[int(competition.attrib["typeid"])]
         self.clubs = []
+
+        pool = competition.find("POOL")
+        self.lanes = int(pool.attrib["lanes"])
+        self.length = int(pool.attrib["size"])
 
         logging.info("Lecture de la compétition {} ({}) - {} à {} - {}".format(self.nom, self.id,
                                                                                self.date_str(), self.ville,
@@ -344,14 +349,14 @@ class Competition:
                     self.par_equipe = len(list(relay.find("RELAYPOSITIONS").findall("RELAYPOSITION")))
                     break
 
-            if self.par_equipe == 0:
+            if self.par_equipe == 1:
                 logging.error("Taille d'équipe non trouvée")
 
         # Swimmers
         for result in competition.find("RESULTS").findall("RESULT"):
             reunion = races[race_id(result)]
             for record in list(result):
-                if self.par_equipe != 0:
+                if self.par_equipe != 1:
                     club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
                     team = int(result.attrib["team"])
                     sexe = conf.nages[int(result.attrib["raceid"])][2]
@@ -386,7 +391,7 @@ class Competition:
         for reunion in self.reunions:
             for club, l in reunion.participants.items():
                 reunion.participations[club] = len(set(l))
-                if self.par_equipe != 0:
+                if self.par_equipe != 1:
                     reunion.engagements[club] = reunion.participations[club] * self.par_equipe
                     reunion.financier[club]["equipe"] += reunion.participations[club]
 
@@ -480,7 +485,7 @@ class Reunion:
         participations = self.participations.get(club, 0)
 
         # needed = (Num of A/B, Total num)
-        if self.competition.par_equipe:
+        if self.competition.par_equipe != 1:
             if participations <= 1:
                 needed = (0, participations)
             else:
@@ -555,6 +560,7 @@ if __name__ == "__main__":
     parser.add_argument("--conf", default="Officiels.xlsx", help="Fichier de configuration")
     parser.add_argument("--plot", default=False, action="store_true", help="Ajout des graphiques")
     parser.add_argument("--extract", default=False, action="store_true", help="Extrait le fichier ZIP en XML")
+    parser.add_argument("--no-pdf", default=True, action="store_true", help="Ne pas générer de PDF")
     parser.add_argument("--output", default="Compétitions.pdf", help="Fichier PDF de sortie")
     parser.add_argument("ffnex_files", metavar="fichiers", nargs="+", help="Liste des fichiers ou répertoires " +
                                                                            "à analyser")
@@ -613,17 +619,17 @@ if __name__ == "__main__":
     for f in ffnex_files:
         competitions.append(Competition(conf, f))
 
-    competitions_by_id = {competition.id: competition for competition in competitions}
-    competition_ids = sorted(competitions_by_id.keys())
-    if len(competitions) != len(set(competition_ids)):
+    competitions_ids = sorted([competition.id for competition in competitions])
+    if len(competitions) != len(set(competitions_ids)):
         duplicates = []
-        for i in range(1, len(competition_ids)):
-            if competition_ids[i] == competition_ids[i-1]:
-                duplicates.append(competition_ids[i])
+        for i in range(1, len(competitions_ids)):
+            if competitions_ids[i] == competitions_ids[i-1]:
+                duplicates.append(competitions_ids[i])
         logging.fatal("Des compétitions sont dupliquées: {}".format(", ".join(map(str, duplicates))))
         exit(-1)
 
     # Create links: linked competitions are removed from the list
+    competitions_by_id = {competition.id: competition for competition in competitions}
     link_list = [competition for competition in competitions if competition.competition_link is not None]
     for competition in link_list:
         master = competitions_by_id[competition.competition_link]
@@ -652,7 +658,7 @@ if __name__ == "__main__":
     points = {"Départemental": {"participations": 0, "engagements": 0, "total_bonus": 0},
               "Régional":      {"participations": 0, "engagements": 0, "total_bonus": 0}}
 
-    points_df = []
+    raw_df = []
 
     logging.info("Génération du fichier PDF {}".format(args.output))
     doc = gen_pdf.DocTemplate(conf, args.output, "Liste des compétitions", "Cédric Airaud")
@@ -682,45 +688,64 @@ if __name__ == "__main__":
                     l["total_bonus"] += pts
                 l[club] += pts
 
-                points_df.append({"Niveau": niveau, "Par Equipe": competition.par_equipe != 0,
-                                  "Compétition": competition.titre(), "Date": competition.startdate,
-                                  "Réunion": reunion.index, "Club": club.nom, "Participations": participations,
-                                  "Engagements": engagements, "Points": pts, "Officiels": num_officiels,
-                                  "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
-                                  "Relais": reunion.financier.get(club, {}).get("relais", 0),
-                                  "Equipes": reunion.financier.get(club, {}).get("equipe", 0)
-                                  })
+                raw_df.append({"Niveau": niveau, "Par Equipe": competition.par_equipe != 1,
+                               "Compétition": competition.titre(), "Date": competition.startdate,
+                               "Réunion": reunion.index, "Club": club.nom,
+                               "Participations": participations * competition.par_equipe,
+                               "Engagements": engagements,
+                               "Points": pts, "Officiels": num_officiels,
+                               "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
+                               "Relais": reunion.financier.get(club, {}).get("relais", 0),
+                               "Equipes": reunion.financier.get(club, {}).get("equipe", 0),
+                               "Lignes": competition.lanes, "Longueur": competition.length
+                               })
+
+    raw_df = pd.DataFrame(raw_df)
+    raw_df["Total"] = raw_df["Individuels"] * 3.50 + raw_df["Relais"] * 6 + raw_df["Equipes"] * 25
 
     writer = pd.ExcelWriter("export.xlsx")
 
-    points_df = pd.DataFrame(points_df)
+    points_df = raw_df[['Date', 'Niveau', 'Compétition', 'Réunion', 'Club', 'Par Equipe', 'Participations', 'Engagements',
+                        'Officiels', 'Points']]
     points_df.to_excel(writer, sheet_name="Points")
 
-    officiels_df = points_df.groupby(['Niveau', 'Club'])['Participations', 'Engagements', 'Officiels'].sum()
+    officiels_df = raw_df.groupby(['Niveau', 'Club'])['Participations', 'Engagements', 'Officiels'].sum()
     officiels_df.to_excel(writer, sheet_name="Nombre d'officiels")
-    worksheet = writer.sheets["Nombre d'officiels"]
 
-    points_df["Total"] = points_df["Individuels"] * 3.50 + points_df["Relais"] * 6 + points_df["Equipes"] * 25
-
-    etat_df = points_df.groupby(['Niveau', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total'].sum()
+    etat_df = raw_df.groupby(['Niveau', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total'].sum()
     etat_df.to_excel(writer, sheet_name="Etat financier")
-    worksheet = writer.sheets["Etat financier"]
+
+    #competitions_df = raw_df.groupby(['Niveau', 'Compétition', 'Réunion'])['Participations', 'Engagements',
+    #                                                                       'Officiels'].sum()
+    competitions_df = raw_df.groupby(['Compétition', 'Réunion'])
+    competitions_df = competitions_df.agg({'Participations': np.sum,
+                                           'Engagements': np.sum,
+                                           'Officiels': np.sum,
+                                           'Lignes': lambda x: x.iloc[0],
+                                           'Longueur': lambda x: x.iloc[0],
+                                           'Niveau': lambda x: x.iloc[0],
+                                           'Par Equipe': lambda x: x.iloc[0]})
+    competitions_df['Officiels voulus'] = competitions_df['Lignes'] * 3 + 9
+    competitions_df = competitions_df[["Niveau", "Participations", "Engagements", "Officiels", "Lignes", "Longueur", "Officiels voulus"]]
+    competitions_df.to_excel(writer, sheet_name="Compétitions")
+
+    raw_df.to_excel(writer, sheet_name="Données brutes")
+
 
     writer.save()
-
-
 
     doc.bonus = {level: 0.50 * l["engagements"] / l["total_bonus"] if l["total_bonus"] else 0
                  for level, l in points.items()}
     for level, value in doc.bonus.items():
         logging.info("Valeur du point bonus pour {}: {:.2f} € (Total engagements: {}, total bonus: {:.2f})"
                      .format(level, value, points[level]["engagements"], points[level]["total_bonus"]))
-
-    for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
-        doc.new_club(club)
-
-    for competition in sorted(competitions, key=lambda x: x.startdate):
-        if competition.competition_link is None:
-            doc.new_competition(competition)
-
-    doc.build()
+  
+    if not args.no_pdf:
+        for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
+            doc.new_club(club)
+    
+        for competition in sorted(competitions, key=lambda x: x.startdate):
+            if competition.competition_link is None:
+                doc.new_competition(competition)
+    
+        doc.build()
