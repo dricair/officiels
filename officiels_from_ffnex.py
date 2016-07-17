@@ -112,8 +112,10 @@ class Configuration:
         self.niveaux = {}
         self.type_competitions = {}
         self.niveau_competitions = {}
+        self.engagements = {}
         self.nages = {}
         self.disqualifications = {}
+        self.epreuves = {}
         self.reunions = []
         self.filename = filename
 
@@ -143,8 +145,14 @@ class Configuration:
             self.postes[index] = Poste(index=index, nom=row["Poste"], niveau=niveau)
             logging.debug("Poste {}: {}".format(index, str(self.postes[index])))
 
+        for index, row in self.read_sheet("Epreuves", ["Nom"], 0).iterrows():
+            self.epreuves[index] = row["Nom"]
+
         for index, row in self.read_sheet("Niveau compétitions", ["Niveau"], 0).iterrows():
             self.niveau_competitions[index] = row["Niveau"]
+            self.engagements[row["Niveau"]] = {"Individuels": row["Individuels"],
+                                               "Relais": row["Relais"],
+                                               "Equipes": row["Equipes"]}
 
         for index, row in self.read_sheet("Types compétitions", ["Description", "Niveau"], 0).iterrows():
             niveau = int(row["Niveau"])
@@ -294,10 +302,12 @@ class Competition:
 
         # List of swimmers
         nageurs = {}
+        nom_nageurs = {}
         for n in competition.find("SWIMMERS").findall("SWIMMER"):
             index, clubid = int(n.attrib["id"]), int(n.attrib["clubid"])
             club = self.conf.clubs.get(clubid, None)
             nageurs[index] = club
+            nom_nageurs[index] = n.attrib["firstname"] + " " + n.attrib["lastname"]
             if club is not None and club not in self.clubs:
                 self.clubs.append(club)
 
@@ -306,6 +316,7 @@ class Competition:
             return "{}_{}".format(item.attrib["raceid"], item.attrib["roundid"])
 
         races = {}
+        finals = {}
         for session in competition.find("SESSIONS").findall("SESSION"):
             # List of races, with an index to the reunion
             reunion = Reunion(int(session.attrib["number"]), self)
@@ -314,6 +325,7 @@ class Competition:
                 if event.attrib["type"] == "RACE":
                     race_found = True
                     races[race_id(event)] = reunion
+                    finals[race_id(event)] = "Final" in conf.epreuves[int(event.attrib["roundid"])]
 
             reunion.participations = {club: 0 for club in self.clubs}
             reunion.participants = {club: [] for club in self.clubs}
@@ -355,21 +367,25 @@ class Competition:
         # Swimmers
         for result in competition.find("RESULTS").findall("RESULT"):
             reunion = races[race_id(result)]
+            is_final = finals[race_id(result)]
+
             for record in list(result):
                 if self.par_equipe != 1:
                     club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
                     team = int(result.attrib["team"])
                     sexe = conf.nages[int(result.attrib["raceid"])][2]
-                    if club is not None:
+                    if club is not None and not is_final:
                         reunion.participants[club].append("{} {}".format(team, sexe))
 
                 elif record.tag == "SOLO":
                     nageurid = int(record.attrib["swimmerid"])
-                    club = nageurs[nageurid]
+                    # club = nageurs[nageurid] Bug: declaration of swimmers does not contain correct club
+                    club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
                     if club is not None:
                         reunion.participants[club].append(nageurid)
                         reunion.engagements[club] += 1
-                        reunion.financier[club]["individuel"] += 1
+                        if not is_final:
+                          reunion.financier[club]["individuel"] += 1
 
                 elif record.tag == "RELAY":
                     positions = record.find("RELAYPOSITIONS")
@@ -377,23 +393,25 @@ class Competition:
                         club = None
                         for relay_position in positions:
                             nageurid = int(relay_position.attrib["swimmerid"])
-                            club = nageurs[nageurid]
+                            # club = nageurs[nageurid] Bug: declaration of swimmers does not contain correct club
+                            club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
                             if club is not None:
                                 reunion.participants[club].append(nageurid)
                                 reunion.engagements[club] += 1
-                        if club is not None:
+                        if club is not None and not is_final:
                             reunion.financier[club]["relais"] += 1
 
                 elif record.tag == "SPLIT":
                     pass
 
         # Counts number of participations per club
-        for reunion in self.reunions:
+        for reunion_num, reunion in enumerate(self.reunions):
             for club, l in reunion.participants.items():
                 reunion.participations[club] = len(set(l))
                 if self.par_equipe != 1:
                     reunion.engagements[club] = reunion.participations[club] * self.par_equipe
-                    reunion.financier[club]["equipe"] += reunion.participations[club]
+                    if reunion_num == 0: # Only first reunion when by team
+                        reunion.financier[club]["equipe"] += reunion.participations[club]
 
         # Update list of competitions for each club
         for club in self.clubs:
@@ -560,7 +578,6 @@ if __name__ == "__main__":
     parser.add_argument("--conf", default="Officiels.xlsx", help="Fichier de configuration")
     parser.add_argument("--plot", default=False, action="store_true", help="Ajout des graphiques")
     parser.add_argument("--extract", default=False, action="store_true", help="Extrait le fichier ZIP en XML")
-    parser.add_argument("--no-pdf", default=True, action="store_true", help="Ne pas générer de PDF")
     parser.add_argument("--output", default="Compétitions.pdf", help="Fichier PDF de sortie")
     parser.add_argument("ffnex_files", metavar="fichiers", nargs="+", help="Liste des fichiers ou répertoires " +
                                                                            "à analyser")
@@ -663,6 +680,7 @@ if __name__ == "__main__":
     logging.info("Génération du fichier PDF {}".format(args.output))
     doc = gen_pdf.DocTemplate(conf, args.output, "Liste des compétitions", "Cédric Airaud")
     for competition in competitions:
+
         if competition.departemental():
             niveau = "Départemental"
         else:
@@ -682,16 +700,18 @@ if __name__ == "__main__":
                 officiels = reunion.officiels_per_club().get(club, [])
                 num_officiels = len([o for o in officiels if o.valid])
 
+                if competition.competition_link:
+                  pts, num_officiels, engagements, participations = 0, 0, 0, 0
+
                 l["participations"] += participations
                 l["engagements"] += engagements
-                if pts > 0:
-                    l["total_bonus"] += pts
                 l[club] += pts
 
-                raw_df.append({"Niveau": niveau, "Par Equipe": competition.par_equipe != 1,
+                raw_df.append({"Niveau": competition.niveau, "Structure": niveau, 
+                               "Par Equipe": competition.par_equipe != 1,
                                "Compétition": competition.titre(), "Date": competition.startdate,
                                "Réunion": reunion.index, "Club": club.nom,
-                               "Participations": participations * competition.par_equipe,
+                               "Participations": participations,
                                "Engagements": engagements,
                                "Points": pts, "Officiels": num_officiels,
                                "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
@@ -701,51 +721,58 @@ if __name__ == "__main__":
                                })
 
     raw_df = pd.DataFrame(raw_df)
-    raw_df["Total"] = raw_df["Individuels"] * 3.50 + raw_df["Relais"] * 6 + raw_df["Equipes"] * 25
 
+    def total_engagements(row):
+      prices = conf.engagements[row["Niveau"]]
+      return row["Individuels"] * prices["Individuels"] + row["Relais"] * prices["Relais"] + row["Equipes"] * prices["Equipes"]
+
+    raw_df["Total"] = raw_df.apply(total_engagements, axis=1)
+    
     writer = pd.ExcelWriter("export.xlsx")
 
-    points_df = raw_df[['Date', 'Niveau', 'Compétition', 'Réunion', 'Club', 'Par Equipe', 'Participations', 'Engagements',
+    points_df = raw_df[['Date', 'Niveau', 'Structure', 'Compétition', 'Réunion', 'Club', 'Par Equipe', 'Participations', 'Engagements',
                         'Officiels', 'Points']]
     points_df.to_excel(writer, sheet_name="Points")
 
-    officiels_df = raw_df.groupby(['Niveau', 'Club'])['Participations', 'Engagements', 'Officiels'].sum()
+    officiels_df = raw_df.groupby(['Structure', 'Club'])['Participations', 'Engagements', 'Officiels', 'Points'].sum()
     officiels_df.to_excel(writer, sheet_name="Nombre d'officiels")
 
-    etat_df = raw_df.groupby(['Niveau', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total'].sum()
+    etat_df = raw_df.groupby(['Structure', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total', 'Points'].sum()
+    etat_df.rename(columns = {'Points': 'Points Bonus/Malus'}, inplace=True)
     etat_df.to_excel(writer, sheet_name="Etat financier")
 
-    #competitions_df = raw_df.groupby(['Niveau', 'Compétition', 'Réunion'])['Participations', 'Engagements',
-    #                                                                       'Officiels'].sum()
+    first_item = lambda x: x.iloc[0]
+
     competitions_df = raw_df.groupby(['Compétition', 'Réunion'])
     competitions_df = competitions_df.agg({'Participations': np.sum,
                                            'Engagements': np.sum,
                                            'Officiels': np.sum,
-                                           'Lignes': lambda x: x.iloc[0],
-                                           'Longueur': lambda x: x.iloc[0],
-                                           'Niveau': lambda x: x.iloc[0],
-                                           'Par Equipe': lambda x: x.iloc[0]})
+                                           'Lignes': first_item,
+                                           'Longueur': first_item,
+                                           'Niveau': first_item,
+                                           'Par Equipe': first_item})
     competitions_df['Officiels voulus'] = competitions_df['Lignes'] * 3 + 9
     competitions_df = competitions_df[["Niveau", "Participations", "Engagements", "Officiels", "Lignes", "Longueur", "Officiels voulus"]]
     competitions_df.to_excel(writer, sheet_name="Compétitions")
 
     raw_df.to_excel(writer, sheet_name="Données brutes")
-
-
     writer.save()
+
+    bonus_df = officiels_df[officiels_df["Points"] > 0].reset_index()
+    for key, l in points.items():
+        l["total_bonus"] = bonus_df[bonus_df["Structure"] == key]["Points"].sum()
 
     doc.bonus = {level: 0.50 * l["engagements"] / l["total_bonus"] if l["total_bonus"] else 0
                  for level, l in points.items()}
     for level, value in doc.bonus.items():
-        logging.info("Valeur du point bonus pour {}: {:.2f} € (Total engagements: {}, total bonus: {:.2f})"
+        logging.info("Valeur du point bonus pour {}: {:.2f} € (Total engagements: {}, total bonus: {})"
                      .format(level, value, points[level]["engagements"], points[level]["total_bonus"]))
   
-    if not args.no_pdf:
-        for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
-            doc.new_club(club)
+    for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
+        doc.new_club(club)
     
-        for competition in sorted(competitions, key=lambda x: x.startdate):
-            if competition.competition_link is None:
-                doc.new_competition(competition)
+    for competition in sorted(competitions, key=lambda x: x.startdate):
+        if competition.competition_link is None:
+            doc.new_competition(competition)
     
-        doc.build()
+    doc.build()
