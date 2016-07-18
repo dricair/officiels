@@ -663,9 +663,13 @@ if __name__ == "__main__":
             mreunion = master.reunions[i]
 
             for club in set(list(creunion.participations.keys()) + list(mreunion.participations.keys())):
+                if master not in club.competitions:
+                    club.competitions.append(master)
                 mreunion.participations[club] = mreunion.participations.get(club,0) + creunion.participations.get(club,0)
 
             for club in set(list(creunion.engagements.keys()) + list(mreunion.engagements.keys())):
+                if master not in club.competitions:
+                    club.competitions.append(master)
                 mreunion.engagements[club] = mreunion.engagements.get(club, 0) + creunion.engagements.get(club, 0)
 
             for id, officiel in creunion.officiels.items():
