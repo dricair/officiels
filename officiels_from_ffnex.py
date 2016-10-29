@@ -54,40 +54,90 @@ class Niveau:
     def __eq__(self, other):
         return self.valeur == other.valeur
 
+    def __le__(self, other):
+        return self.valeur <= other.valeur
+
     def __str__(self):
         return self.nom
 
 
 class Poste:
-    def __init__(self, index, nom, niveau):
+    def __init__(self, index, nom, niveau, depart, regional):
         self.index = index
         self.nom = nom
         self.niveau = niveau
 
+        # Empty, Licencié or Officiel: when does it count?
+        self.depart = depart
+        self.regional = regional
+
     def __str__(self):
         return "{}".format(self.nom)
+
+    def valid_for(self, officiel):
+        """
+        Indicates if this poste is valid for an officiel, for depart and regional levels
+        :param officiel:
+        :return: (depart, regional)
+        """
+        return (self.depart == "Licencié" or self.depart == "Officiel" and officiel.real_officiel,
+                self.regional == "Licencié" or self.regional == "Officiel" and officiel.real_officiel)
+
+    def preferred_to(self, other):
+        """
+        Return True if this post should be preferred to the other one
+        :param other: Other poste to look at
+        :return: bool
+        """
+        scores = {"Licencié": 2, "Officiel": 1}
+        score_self  = self.niveau.valeur + scores.get(self.depart, 0) + scores.get(self.regional, 0)
+        score_other = other.niveau.valeur + scores.get(other.depart, 0) + scores.get(other.regional, 0)
+        logging.debug("{}: {}, {}: {}".format(str(self), score_self, str(other), score_other))
+        if score_self != score_other:
+            return score_self > score_other
+        else:
+            return self.index < other.index
 
 
 class Officiel:
     """
     Represent an Officiel
     """
-    def __init__(self, index, nom, prenom, club, niveau):
+    def __init__(self, index, nom, prenom, club, niveau, niveau_c):
         self.nom = nom
         self.prenom = prenom
         self.club = club
         self.index = index
         self.niveau = copy.deepcopy(niveau)
         self.poste = None
-        self.valid = niveau.valeur > 0  # 0 = Seulement licencié
+        self.real_officiel = niveau_c <= self.niveau
+        self.valid = None
 
     def set_poste(self, poste):
         """
         Set the poste. If required level is more than officiel level, change the level
         """
-        self.poste = poste
-        if self.valid and poste.niveau > self.niveau:
+        if self.poste is None:
+            self.poste = poste
+        else:
+            if self.poste.preferred_to(poste):
+                logging.info("Pour {}, le poste {} est préféré à {}".format(str(self), str(self.poste), str(poste)))
+                return
+            else:
+                logging.info("Pour {}, le poste {} est préféré à {}".format(str(self), str(poste), str(self.poste)))
+                self.poste = poste
+
+        if self.niveau < poste.niveau:
             logging.warning("{}: le poste {} requiert un niveau {}".format(str(self), str(poste), str(poste.niveau)))
+        self.valid = self.poste.valid_for(self)
+
+    def is_valid(self, depart):
+        """
+        Return True if officiel at given post is valid
+        :param depart: True if Departemental, False if Regional or more
+        :return: bool
+        """
+        return self.valid[0 if depart else 1]
 
     def get_level(self):
         return self.niveau
@@ -130,8 +180,10 @@ class Configuration:
             logging.debug("Niveau {}: {}".format(index, str(self.niveaux[index])))
             if row["Niveau"] == "C":
                 self.niveau_c = self.niveaux[index]
+            if row["Niveau"] == "B":
+                self.niveau_b = self.niveaux[index]
 
-        for index, row in self.read_sheet("Postes", ["Poste", "Niveau"], 0).iterrows():
+        for index, row in self.read_sheet("Postes", ["Poste", "Niveau", "Départemental", "Régional"], 0).iterrows():
             niveau = min(self.niveaux.values())
             n = row["Niveau"] if not isinstance(row["Niveau"], float) else ""
             if n != "":
@@ -142,7 +194,9 @@ class Configuration:
                 else:
                     niveau = l[0]
 
-            self.postes[index] = Poste(index=index, nom=row["Poste"], niveau=niveau)
+
+            self.postes[index] = Poste(index=index, nom=row["Poste"], niveau=niveau, depart=row["Départemental"],
+                                       regional=row["Régional"])
             logging.debug("Poste {}: {}".format(index, str(self.postes[index])))
 
         for index, row in self.read_sheet("Epreuves", ["Nom"], 0).iterrows():
@@ -293,7 +347,7 @@ class Competition:
             niveau = self.conf.niveaux.get(gradeid, None)
             if club is not None:
                 officiels[index] = Officiel(index=index, nom=o.attrib["lastname"], prenom=o.attrib["firstname"],
-                                            club=club, niveau=niveau)
+                                            club=club, niveau=niveau, niveau_c=conf.niveau_c)
                 logging.debug("Officiel trouvé: {}".format(str(officiels[index])))
                 if club not in self.clubs:
                     self.clubs.append(club)
@@ -503,7 +557,14 @@ class Reunion:
         participations = self.participations.get(club, 0)
 
         # needed = (Num of A/B, Total num)
-        if self.competition.par_equipe != 1:
+        if self.competition.departemental():
+          if participations == 0:
+              needed = (0, 0)
+          else:
+              num_officiels = (participations + 7) // 8
+              needed = (num_officiels // 2, num_officiels)
+
+        elif self.competition.par_equipe != 1:
             if participations <= 1:
                 needed = (0, participations)
             else:
@@ -514,10 +575,8 @@ class Reunion:
                 needed = (0, 0)
             elif participations <= 10:
                 needed = (0, 1)
-            elif participations <= 20 or not self.competition.departemental():
-                needed = (1, 2)
             else:
-                needed = (1, 3)
+                needed = (1, 2)
 
         if type(details) is list:
             s = "{} officiels requis".format(needed[1])
@@ -528,15 +587,12 @@ class Reunion:
         num_ab, num = 0, 0
         club_officiels = self.officiels_per_club().get(club, [])
         for officiel in club_officiels:
-            if not officiel.valid:
-                if self.competition.departemental():
-                    logging.warning("L'officiel {} n'est pas valide et est ignoré".format(str(officiel)))
-                    continue
-                else:
-                    # Régional: all officials
-                    officiel.valid = True
+            if not officiel.is_valid(self.competition.departemental()):
+                logging.warning("Le licencié/officiel {} n'est pas pas pris en compte au poste {}".format(
+                                str(officiel), str(officiel.poste)))
+                continue
             num += 1
-            if officiel.get_level() > conf.niveau_c:
+            if conf.niveau_b <= officiel.get_level():
                 num_ab += 1
 
         if not self.competition.departemental() and num > 5:
@@ -702,10 +758,10 @@ if __name__ == "__main__":
                 participations = reunion.participations.get(club, 0)
                 engagements = reunion.engagements.get(club, 0)
                 officiels = reunion.officiels_per_club().get(club, [])
-                num_officiels = len([o for o in officiels if o.valid])
+                num_officiels = len([o for o in officiels if o.is_valid(competition.departemental())])
 
                 if competition.competition_link:
-                  pts, num_officiels, engagements, participations = 0, 0, 0, 0
+                    pts, num_officiels, engagements, participations = 0, 0, 0, 0
 
                 l["participations"] += participations
                 l["engagements"] += engagements

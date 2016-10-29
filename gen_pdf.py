@@ -293,8 +293,8 @@ class DocTemplate(BaseDocTemplate):
             officiels = []
             for off in sorted(off_per_club.get(club, []), key=lambda o: o.nom):
                 officiels.append("{}: {} {}".format(str(off.get_level()), off.prenom, off.nom))
-                if not off.valid:
-                    officiels[-1] = "<strike>{}</strike>".format(officiels[-1])
+                if not off.is_valid(reunion.competition.departemental()):
+                    officiels[-1] = "<strike>{} ({})</strike>".format(officiels[-1], str(off.poste))
             paragraph_officiels = Paragraph("<br/>".join(officiels), sNormal)
 
             table_data.append([[club_nom, participations], paragraph_officiels, paragraph_points])
