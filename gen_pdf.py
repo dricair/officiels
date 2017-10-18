@@ -10,6 +10,7 @@
 
 import logging
 import datetime
+import collections
 
 from reportlab.platypus import BaseDocTemplate, PageTemplate, NextPageTemplate, PageBreak, Frame
 from reportlab.platypus import Paragraph, Table, TableStyle
@@ -42,6 +43,7 @@ except TTFError as e:
 
 sNormal = styles['Normal']
 sHeading2 = styles['Heading2']
+sHeading3 = styles['Heading3']
 
 header_table_style = {
     "Départemental": TableStyle([('BOX',        (0, 0), (-1, -1), 0.25, "#FF4500"),
@@ -95,7 +97,7 @@ class ClubTemplate(PageTemplate):
         canv.setStrokeColor(colors.grey)
 
         # Header
-        if not doc.newClub:
+        if not doc.newClub and doc.club is not None:
             canv.drawCentredString(PAGE_WIDTH/2.0, PAGE_HEIGHT-cm, doc.club.nom)
             canv.line(cm, PAGE_HEIGHT-1.3*cm, PAGE_WIDTH-cm, PAGE_HEIGHT-1.3*cm)
         doc.newClub = False
@@ -180,13 +182,13 @@ class DocTemplate(BaseDocTemplate):
             if departemental:
                 competitions = [c for c in club.competitions if c.departemental() and c.competition_link is None]
                 self.story.append(Paragraph("Compétitions départementales", sHeading2))
-                bonus = self.bonus["Départemental"]
+                bonus = self.bonus[club.departement_name()]
             else:
                 competitions = [c for c in club.competitions if not c.departemental() and c.competition_link is None]
                 self.story.append(Paragraph("Compétitions régionales et plus", sHeading2))
                 bonus = self.bonus["Régional"]
 
-            table_data = [["Compétition", "Réunions", "Points"]]
+            table_data = [["Compétition", "Réunion", "Points"]]
 
             for competition in sorted(competitions, key=lambda c: c.startdate):
                 description = [Paragraph("{} - {}".format(competition.date_str(), competition.titre()), sNormal)]
@@ -210,6 +212,42 @@ class DocTemplate(BaseDocTemplate):
             else:
                 self.story.append(Paragraph("Valeur du bonus (Estimation): {:.2f} €"
                                             .format(total * bonus), sNormal))
+
+        self.story.append(Paragraph("Liste des officiels", sHeading2))
+        if len(club.officiels.keys()) == 0:
+            self.story.append(Paragraph("Pas d'officiel pour le club", sNormal))
+        else:
+            self.story.append(Paragraph("Lorsqu'un officiel est inscrit pour plusieurs poste, un seul est retenu.",
+                                        sNormal))
+
+            officiels = sorted(club.officiels.keys(), key=lambda o: o.nom)
+            for officiel in officiels:
+                table_data = [["{} {} ({}) - {} participations".format(officiel.prenom, officiel.nom, officiel.niveau,
+                                                                       len(club.officiels[officiel].values())),
+                               "Réunion", "Rôle"]]
+
+                competitions = dict()
+                for reunion, poste in club.officiels[officiel].items():
+                    if reunion.competition not in competitions:
+                        competitions[reunion.competition] = []
+                    competitions[reunion.competition].append((reunion, poste))
+
+                for competition in sorted(competitions.keys(), key=lambda c: c.startdate):
+                    description = [Paragraph("{} - {}".format(competition.date_str(), competition.titre()), sNormal)]
+                    row = [description, [], []]
+                    for c in competition.linked:
+                        description.append(Paragraph("{} - {}".format(c.date_str(), c.titre()), sNormal))
+
+                    for reunion, poste in competitions[competition]:
+                        row[1].append(Paragraph("<a href='#{}'>{}</a>".format(reunion.link(), reunion.titre), sNormal))
+                        row[2].append(Paragraph(poste, sNormal))
+                    table_data.append(row)
+
+                table_style = header_table_style["Content"]
+                table = Table(table_data, [self.page_width * x for x in (0.65, 0.15, 0.20)], style=table_style)
+                self.story.append(Paragraph("&nbsp;", sNormal))
+                self.story.append(table)
+
 
     def competition_header(self, competition):
         """
@@ -273,7 +311,7 @@ class DocTemplate(BaseDocTemplate):
         off_per_club = reunion.officiels_per_club()
         total_participations, total_engagements = 0, 0
         for club, num in sorted(reunion.participations.items(), key=lambda c: c[0].nom):
-            club_nom = Paragraph("<a href='#{}'>{}</a>".format(club.link(), club.nom), sNormal)
+            club_nom = Paragraph(club.nom, sNormal)
             total_participations += num
             total_engagements += reunion.engagements.get(club, 0)
             if reunion.competition.par_equipe != 1:
