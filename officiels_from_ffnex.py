@@ -406,17 +406,18 @@ class Competition:
         # List of clubs declared as banniere
         for o in competition.find("CLUBS").findall("CLUB"):
             index, clubid, name = int(o.attrib["id"]), o.attrib.get("clubid", None), o.attrib["name"]
-            if clubid is None:
-                logging.info("Bannière trouvée: {}. Rajouter clubid='<id>' s'il représente un club".format(name))
-            else:
-                clubid = int(clubid)
-                logging.info("Club déclaré en bannière: {} ({} -> {})".format(name, index, clubid))
-                club = self.conf.clubs.get(clubid, None)
-                if club is None:
-                    logging.fatal("Ce club est invalide")
-                if club.nom != name:
-                    logging.warning("Le nom ne correspond pas: '{}' vs '{}'".format(name, club.nom))
-                self.conf.clubs[index] = club
+            if index < 0:
+                if clubid is None:
+                    logging.info("Bannière trouvée: {}. Rajouter clubid='<id>' s'il représente un club".format(name))
+                else:
+                    clubid = int(clubid)
+                    logging.info("Club déclaré en bannière: {} ({} -> {})".format(name, index, clubid))
+                    club = self.conf.clubs.get(clubid, None)
+                    if club is None:
+                        logging.fatal("Ce club est invalide")
+                    if club.nom != name:
+                        logging.warning("Le nom ne correspond pas: '{}' vs '{}'".format(name, club.nom))
+                    self.conf.clubs[index] = club
 
         # List of swimmers
         nageurs = {}
