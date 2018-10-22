@@ -187,6 +187,7 @@ class Configuration:
         self.club_override = {}
         self.reunions = []
         self.filename = filename
+        self.grille = {}
 
         logging.info("Lecture du fichier de configuration")
 
@@ -206,12 +207,12 @@ class Configuration:
             niveau = min(self.niveaux.values())
             n = row["Niveau"] if not isinstance(row["Niveau"], float) else ""
             if n != "":
-                l = [item for item in self.niveaux.values() if item.nom == n]
-                if len(l) != 1:
+                niveau_l = [item for item in self.niveaux.values() if item.nom == n]
+                if len(niveau_l) != 1:
                     raise OfficielException("Le niveau {} pour le poste {} n'est pas correct"
                                             .format(n, row["Poste"]))
                 else:
-                    niveau = l[0]
+                    niveau = niveau_l[0]
 
             self.postes[index] = Poste(index=index, nom=row["Poste"], niveau=niveau, depart=row["Départemental"],
                                        regional=row["Régional"])
@@ -263,6 +264,47 @@ class Configuration:
                 sexe = None
 
             self.nages[index] = row["Nage"], nage, sexe
+
+        r1 = re.compile(r"([DH]) (\d+)-(\d+)")
+        r2 = re.compile(r"([DH]) (\d+)\+")
+        year = datetime.date.today().year
+        if datetime.date.today().month >= 9:
+            year += 1
+
+        nages_indexes = {row[0]: idx for idx, row in self.nages.items()}
+        nages_sexe = {"D": " Dames", "H": " Messieurs"}
+        self.grille_max = {"D": 18, "H": 19}
+        for index, row in self.read_sheet("Grilles", ["D 14-15", "D 16-17", "D 18+", "H 15-16", "H 17-18",
+                                                      "H 19+", "Tolérance"], 0).iterrows():
+            for key in row.keys():
+                if key == "Tolérance":
+                    for value in nages_sexe.values():
+                        nage_idx = nages_indexes[index + value]
+                        self.grille[nage_idx]["Tolérance"] = row[key]
+                    continue
+
+                m = r1.match(key)
+                if m is not None:
+                    # Different index for H/F
+                    nage_idx = nages_indexes[index + nages_sexe[m.group(1)]]
+                    if nage_idx not in self.grille:
+                        self.grille[nage_idx] = {}
+                    for i in range(year - int(m.group(3)), year - int(m.group(2))+1):
+                        self.grille[nage_idx][i] = row[key]
+                    continue
+
+                m = r2.match(key)
+                if m is not None:
+                    # Different index for H/F
+                    nage_idx = nages_indexes[index + nages_sexe[m.group(1)]]
+                    if nage_idx not in self.grille:
+                        self.grille[nage_idx] = {}
+                    self.grille[nage_idx][year - int(m.group(2))] = row[key]
+                    self.grille[nage_idx]["Min"] = year - int(m.group(2))
+                    continue
+
+                else:
+                    logging.fatal("Impossible de comprendre {} dans la page Grilles".format(key))
 
         r = re.compile("DSQr(\d+)")
         for index, row in self.read_sheet("Disqualifications", ["Code", "Libellé"], 0).iterrows():
@@ -318,6 +360,7 @@ class Competition:
         self.reunions = []
         self.competition_link = None  # Link from this competition to another one
         self.linked = []  # List of competitions linked to it
+        self.depassements = []
 
         try:
             if zipfile.is_zipfile(filename):
@@ -371,7 +414,7 @@ class Competition:
             club = self.conf.clubs.get(clubid, None)
             if club is not None:
                 continue
-            departement = code[3:5]
+            departement = code[4:6]
             departements = set([c.departement for c in self.conf.clubs.values()])
             if departement in departements:
                 logging.error("Le club {} ({}) n'est pas dans la liste:\n{};{};{}".format(name, code, clubid, name,
@@ -422,13 +465,19 @@ class Competition:
         # List of swimmers
         nageurs = {}
         nom_nageurs = {}
+        nageurs_year = {}
         for n in competition.find("SWIMMERS").findall("SWIMMER"):
-            index, clubid = int(n.attrib["id"]), int(n.attrib["clubid"])
-            club = self.conf.clubs.get(clubid, None)
-            nageurs[index] = club
-            nom_nageurs[index] = n.attrib["firstname"] + " " + n.attrib["lastname"]
-            if club is not None and club.departement != '99' and club not in self.clubs:
-                self.clubs.append(club)
+            if "clubid" in n.attrib:
+                index, clubid = int(n.attrib["id"]), int(n.attrib["clubid"])
+                club = self.conf.clubs.get(clubid, None)
+                nageurs[index] = club
+                nom_nageurs[index] = n.attrib["firstname"] + " " + n.attrib["lastname"]
+                nageurs_year[index] = datetime.datetime.strptime(n.attrib["birthdate"], "%Y-%m-%d").year
+                if club is not None and club.departement != '99' and club not in self.clubs:
+                    self.clubs.append(club)
+            else:
+                logging.warning("Le nageur {} {} ({}) est ignoré (Pas de clubid)".format(n.attrib["firstname"], 
+                                n.attrib["lastname"], n.attrib["nation"]))
 
         # List of sessions
         def race_id(item):
@@ -450,6 +499,8 @@ class Competition:
             reunion.participants = {club: [] for club in self.clubs}
             reunion.engagements = {club: 0 for club in self.clubs}
             reunion.financier = {club: dict(individuel=0, relais=0, equipe=0) for club in self.clubs}
+            for key in reunion.forfaits:
+                reunion.forfaits[key] = {club: 0 for club in self.clubs}
 
             if race_found:
                 self.reunions.append(reunion)
@@ -459,7 +510,9 @@ class Competition:
                     officiel = officiels.get(officielid, None)
                     if poste is None:
                         logging.error("Officiel {}: poste {} non trouvé".format(str(officiel), roleid))
-                    if officiel is not None:
+                    if officiel is None:
+                        logging.warning("Officiel ID {} (role {}) non trouvé".format(officielid, roleid))
+                    else:
                         logging.debug("{}: {}".format(str(officiel), str(poste)))
 
                         if officielid in reunion.officiels:
@@ -495,16 +548,48 @@ class Competition:
                     sexe = conf.nages[int(result.attrib["raceid"])][2]
                     if club is not None and not is_final:
                         reunion.participants[club].append("{} {}".format(team, sexe))
+                        disqualification = int(result.attrib["disqualificationid"])
+                        if disqualification in reunion.forfaits:
+                            reunion.forfaits[disqualification][club] += 1
 
                 elif record.tag == "SOLO":
                     nageurid = int(record.attrib["swimmerid"])
                     # club = nageurs[nageurid] Bug: declaration of swimmers does not contain correct club
                     club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
-                    if club is not None:
+                    if club is not None and club in self.clubs:
+                        if club not in reunion.participants:
+                            logging.error("Club {} not in participants list".format(str(club)))
                         reunion.participants[club].append(nageurid)
                         reunion.engagements[club] += 1
                         if not is_final:
                             reunion.financier[club]["individuel"] += 1
+                        disqualification = int(result.attrib["disqualificationid"])
+                        if disqualification in reunion.forfaits:
+                            reunion.forfaits[disqualification][club] += 1
+
+                        # Dépassement par rapport à la grille
+                        #nage = int(result.attrib["raceid"])
+                        #if nage in conf.grille and disqualification == 0:
+                        #    year = nageurs_year[nageurid]
+                        #    nage = conf.grille[nage]
+                        #    if year < nage['Min']:
+                        #        year = nage['Min']
+                        #    minutes, secondes = [int(x) for x in result.attrib["swimtime"].split(".")]
+                        #    temps = datetime.time(hour=minutes // 60, minute=minutes % 60, second=secondes // 100,
+                        #                          microsecond=(secondes % 100) * 10)
+                        #    tolerance = datetime.timedelta(seconds=nage["Tolérance"])
+                        #    temps_tolerance = ((datetime.datetime.combine(datetime.date.today(),
+                        #                                                  nage[year]) + tolerance).time())
+
+                        #    if temps > nage[year]:
+                        #        depassement = temps > temps_tolerance
+                        #        self.depassements.append({"Club": club, "Nageur": nom_nageurs[nageurid],
+                        #                                  "Temps": temps, "Limite": nage[year],
+                        #                                  "Temps avec tolérance": temps_tolerance,
+                        #                                  "Dépassement": "Oui" if depassement else "Non"})
+                        #        logging.info("Dépassement pour {} ({}): {} (Limite: {}, avec tolérance {}".format(
+                        #            nom_nageurs[nageurid], str(club), str(temps), str(nage[year]),
+                        #            str(temps_tolerance)))
 
                 elif record.tag == "RELAY":
                     positions = record.find("RELAYPOSITIONS")
@@ -514,11 +599,14 @@ class Competition:
                             nageurid = int(relay_position.attrib["swimmerid"])
                             # club = nageurs[nageurid] Bug: declaration of swimmers does not contain correct club
                             club = self.conf.clubs.get(int(result.attrib["clubid"]), None)
-                            if club is not None:
+                            if club is not None and club in self.clubs:
                                 reunion.participants[club].append(nageurid)
                                 reunion.engagements[club] += 1
-                        if club is not None and not is_final:
+                        if club is not None and club in reunion.financier and not is_final:
                             reunion.financier[club]["relais"] += 1
+                            disqualification = int(result.attrib["disqualificationid"])
+                            if disqualification in reunion.forfaits:
+                                reunion.forfaits[disqualification][club] += 1
 
                 elif record.tag == "SPLIT":
                     pass
@@ -574,6 +662,11 @@ class Reunion:
     """
     Represent a Reunion, base for the calculation
     """
+    # Forfaits
+    DECL = 2      # Déclaré
+    NON_DECL = 4  # Non-déclaré
+    CERT = 1      # Certificat médical
+
     def __init__(self, index, competition):
         self.index = index
         self.competition = competition
@@ -581,6 +674,7 @@ class Reunion:
         self.officiels = {}
         self.participants = None
         self.participations = None
+        self.forfaits = {self.DECL: 0, self.NON_DECL: 0, self.CERT: 0}
         self.engagements = None
         self.financier = None
         self._officiels_per_club = None
@@ -692,6 +786,7 @@ class Reunion:
         if self.competition.competition_link is not None:
             competition_id = self.competition.competition_link.id
         return "C{}_R{}".format(competition_id, self.index)
+
 
 if __name__ == "__main__":
     import gen_pdf
@@ -860,7 +955,10 @@ if __name__ == "__main__":
                                "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
                                "Relais": reunion.financier.get(club, {}).get("relais", 0),
                                "Equipes": reunion.financier.get(club, {}).get("equipe", 0),
-                               "Lignes": competition.lanes, "Longueur": competition.length
+                               "Lignes": competition.lanes, "Longueur": competition.length,
+                               "Disq-Médical": reunion.forfaits[reunion.CERT].get(club, 0),
+                               "Disq-Déclaré": reunion.forfaits[reunion.DECL].get(club, 0),
+                               "Disq-NonDéclaré": reunion.forfaits[reunion.NON_DECL].get(club, 0),
                                })
 
     if args.competition is None:
@@ -883,7 +981,8 @@ if __name__ == "__main__":
                                                              'Officiels', 'Points'].sum()
         officiels_df.to_excel(writer, sheet_name="Officiels par compétition")
     
-        etat_df = raw_df.groupby(['Structure', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total', 'Points'].sum()
+        etat_df = raw_df.groupby(['Structure', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total', 'Points',
+                                                        'Disq-Médical', 'Disq-Déclaré', 'Disq-NonDéclaré'].sum()
         etat_df.rename(columns={'Points': 'Points Bonus/Malus'}, inplace=True)
         etat_df.to_excel(writer, sheet_name="Etat financier")
     
@@ -922,7 +1021,8 @@ if __name__ == "__main__":
                                          "Date": reunion.competition.startdate,
                                          "Compétition": reunion.competition.titre(),
                                          "Réunion": reunion.index,
-                                         "Poste": poste})
+                                         "Poste": poste,
+                                         "Niveau": str(officiel.niveau)})
     
         officiels_df = pd.DataFrame(officiels_df)
         officiels_df.to_excel(writer, sheet_name="Officiels")
