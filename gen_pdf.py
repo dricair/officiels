@@ -188,6 +188,11 @@ class DocTemplate(BaseDocTemplate):
                 self.story.append(Paragraph("Compétitions régionales et plus", sHeading2))
                 bonus = self.bonus["Régional"]
 
+            # TODO: Remove clubs with departement != 06
+            if departemental and club.departement != "06":
+                self.story.append(Paragraph("Pas d'information départementale", sNormal))
+                continue
+
             table_data = [["Compétition", "Réunion", "Points"]]
 
             for competition in sorted(competitions, key=lambda c: c.startdate):
@@ -334,6 +339,10 @@ class DocTemplate(BaseDocTemplate):
                 if not off.is_valid(reunion.competition.departemental()):
                     officiels[-1] = "<strike>{} ({})</strike>".format(officiels[-1], str(off.poste))
             paragraph_officiels = Paragraph("<br/>".join(officiels), sNormal)
+
+            # TODO: Pas d'information départementale pour les clubs hors 06
+            if reunion.competition.departemental() and club.departement != "06":
+                paragraph_points = Paragraph("Pas de détails", sNormal)
 
             table_data.append([[club_nom, participations], paragraph_officiels, paragraph_points])
 
