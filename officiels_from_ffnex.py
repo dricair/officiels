@@ -717,9 +717,14 @@ class Reunion:
 
         # needed = (Num of A/B, Total num)
         if self.competition.departemental():
+            num_equipes = participations
             participations *= self.competition.par_equipe
             if participations == 0:
                 needed = (0, 0)
+            elif self.competition.par_equipe == 10:
+                # Special case of equipes by 10 (Interclubs TC)
+                num_officiels = num_equipes
+                needed = (num_officiels // 2, num_officiels)
             else:
                 num_officiels = (participations + 7) // 8
                 needed = (num_officiels // 2, num_officiels)
