@@ -936,9 +936,17 @@ if __name__ == "__main__":
                 engagements = reunion.engagements.get(club, 0)
                 officiels = reunion.officiels_per_club().get(club, [])
                 num_officiels = len([o for o in officiels if o.is_valid(competition.departemental())])
+                officiels_per_categorie = {}
+                for officiel in officiels:
+                    if officiel.is_valid(competition.departemental()):
+                        niveau = officiel.niveau.nom
+                        if niveau not in officiels_per_categorie:
+                            officiels_per_categorie[niveau] = 0
+                        officiels_per_categorie[niveau] += 1
 
                 if competition.competition_link:
                     pts, num_officiels, engagements, participations = 0, 0, 0, 0
+                    officiels_per_categorie = {}
 
                 if competition.departemental():
                     niveau = club.departement_name()
@@ -952,21 +960,26 @@ if __name__ == "__main__":
                 l["engagements"] += engagements
                 l[club] += pts
 
-                raw_df.append({"Niveau": competition.niveau, "Structure": niveau, 
-                               "Par Equipe": competition.par_equipe != 1,
-                               "Compétition": competition.titre(), "Date": competition.startdate,
-                               "Réunion": reunion.index, "Club": club.nom,
-                               "Participations": participations,
-                               "Engagements": engagements,
-                               "Points": pts, "Officiels": num_officiels,
-                               "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
-                               "Relais": reunion.financier.get(club, {}).get("relais", 0),
-                               "Equipes": reunion.financier.get(club, {}).get("equipe", 0),
-                               "Lignes": competition.lanes, "Longueur": competition.length,
-                               "Disq-Médical": reunion.forfaits[reunion.CERT].get(club, 0),
-                               "Disq-Déclaré": reunion.forfaits[reunion.DECL].get(club, 0),
-                               "Disq-NonDéclaré": reunion.forfaits[reunion.NON_DECL].get(club, 0),
-                               })
+                raw = {"Niveau": competition.niveau, "Structure": niveau,
+                       "Par Equipe": competition.par_equipe != 1,
+                       "Compétition": competition.titre(), "Date": competition.startdate,
+                       "Réunion": reunion.index, "Club": club.nom,
+                       "Participations": participations,
+                       "Engagements": engagements,
+                       "Points": pts, "Officiels": num_officiels,
+                       "Individuels": reunion.financier.get(club, {}).get("individuel", 0),
+                       "Relais": reunion.financier.get(club, {}).get("relais", 0),
+                       "Equipes": reunion.financier.get(club, {}).get("equipe", 0),
+                       "Lignes": competition.lanes, "Longueur": competition.length,
+                       "Disq-Médical": reunion.forfaits[reunion.CERT].get(club, 0),
+                       "Disq-Déclaré": reunion.forfaits[reunion.DECL].get(club, 0),
+                       "Disq-NonDéclaré": reunion.forfaits[reunion.NON_DECL].get(club, 0),
+                       }
+
+                for key, value in officiels_per_categorie.items():
+                    raw["Officiels-" + key] = value
+
+                raw_df.append(raw)
 
     if args.competition is None:
         raw_df = pd.DataFrame(raw_df)
@@ -979,12 +992,14 @@ if __name__ == "__main__":
         raw_df["Total"] = raw_df.apply(total_engagements, axis=1)
 
         writer = pd.ExcelWriter("export.xlsx")
-        points_df = raw_df[['Date', 'Niveau', 'Structure', 'Compétition', 'Réunion', 'Club', 
+
+        points_df = raw_df[['Date', 'Niveau', 'Structure', 'Compétition', 'Réunion', 'Club',
                             'Par Equipe', 'Participations', 'Engagements', 'Officiels', 'Points']]
         points_df.to_excel(writer, sheet_name="Points")
-    
-        officiels_df = raw_df.groupby(['Structure', 'Club'])['Participations', 'Engagements',
-                                                             'Officiels', 'Points'].sum()
+
+        columns = (['Participations', 'Engagements', 'Officiels', 'Points'] +
+                   [c for c in raw_df.columns if "Officiels-" in c])
+        officiels_df = raw_df.groupby(['Structure', 'Club'])[columns].sum()
         officiels_df.to_excel(writer, sheet_name="Officiels par compétition")
 
         etat_df = raw_df.groupby(['Structure', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total', 'Points',
