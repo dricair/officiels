@@ -196,8 +196,10 @@ class Configuration:
             logging.debug("Club {}: {}".format(index, str(self.clubs[index])))
 
         for index, row in self.read_sheet("Niveaux", ["Niveau", "Valeur"], 0).iterrows():
+            if np.isnan(index):
+                continue
             self.niveaux[index] = Niveau(index, row["Niveau"], row["Valeur"])
-            logging.debug("Niveau {}: {}".format(index, str(self.niveaux[index])))
+            logging.debug("Niveau {}: {}".format(index, self.niveaux[index]))
             if row["Niveau"] == "C":
                 self.niveau_c = self.niveaux[index]
             if row["Niveau"] == "B":
@@ -331,7 +333,7 @@ class Configuration:
         :rtype: DataFrame
         """
         try:
-            sheet = pd.read_excel(self.filename, sheetname=sheet_name, convert_dates=True, index_col=index_col)
+            sheet = pd.read_excel(self.filename, sheet_name=sheet_name, parse_dates=True, index_col=index_col, engine='openpyxl')
         except xlrd.biffh.XLRDError:
             raise OfficielException("Pas de feuille '{}' trouvée".format(sheet_name))
 
