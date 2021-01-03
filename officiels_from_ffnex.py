@@ -1,4 +1,4 @@
-#! /usr/bin/env python 
+#! /usr/bin/env python
 # -* -coding: utf-8 -*-
 
 """
@@ -476,7 +476,7 @@ class Competition:
                 if club is not None and club.departement != '99' and club not in self.clubs:
                     self.clubs.append(club)
             else:
-                logging.warning("Le nageur {} {} ({}) est ignoré (Pas de clubid)".format(n.attrib["firstname"], 
+                logging.warning("Le nageur {} {} ({}) est ignoré (Pas de clubid)".format(n.attrib["firstname"],
                                 n.attrib["lastname"], n.attrib["nation"]))
 
         # List of sessions
@@ -850,7 +850,7 @@ if __name__ == "__main__":
             except zipfile.BadZipfile as e:
                 logging.error("Le fichier {} ne peut pas être lu correctement:\n{}".format(filename, str(e)))
                 continue
-            
+
             logging.info("Fichier de sauvegarde {}".format(backup_file))
             os.rename(f, backup_file)
 
@@ -968,16 +968,15 @@ if __name__ == "__main__":
 
     if args.competition is None:
         raw_df = pd.DataFrame(raw_df)
-    
+
         def total_engagements(row):
             prices = conf.engagements[row["Niveau"]]
             return (row["Individuels"] * prices["Individuels"] + row["Relais"] * prices["Relais"] +
                     row["Equipes"] * prices["Equipes"])
-    
+
         raw_df["Total"] = raw_df.apply(total_engagements, axis=1)
-        
+
         writer = pd.ExcelWriter("export.xlsx")
-    
         points_df = raw_df[['Date', 'Niveau', 'Structure', 'Compétition', 'Réunion', 'Club', 
                             'Par Equipe', 'Participations', 'Engagements', 'Officiels', 'Points']]
         points_df.to_excel(writer, sheet_name="Points")
@@ -985,15 +984,15 @@ if __name__ == "__main__":
         officiels_df = raw_df.groupby(['Structure', 'Club'])['Participations', 'Engagements',
                                                              'Officiels', 'Points'].sum()
         officiels_df.to_excel(writer, sheet_name="Officiels par compétition")
-    
+
         etat_df = raw_df.groupby(['Structure', 'Club'])['Individuels', 'Relais', 'Equipes', 'Total', 'Points',
                                                         'Disq-Médical', 'Disq-Déclaré', 'Disq-NonDéclaré'].sum()
         etat_df.rename(columns={'Points': 'Points Bonus/Malus'}, inplace=True)
         etat_df.to_excel(writer, sheet_name="Etat financier")
-    
+
         def first_item(x):
             return x.iloc[0]
-    
+
         competitions_df = raw_df.groupby(['Compétition', 'Réunion'])
         competitions_df = competitions_df.agg({'Participations': np.sum,
                                                'Engagements': np.sum,
@@ -1006,17 +1005,17 @@ if __name__ == "__main__":
         competitions_df = competitions_df[["Niveau", "Participations", "Engagements", "Officiels", "Lignes", "Longueur",
                                            "Officiels voulus"]]
         competitions_df.to_excel(writer, sheet_name="Compétitions")
-    
+
         bonus_df = officiels_df[officiels_df["Points"] > 0].reset_index()
         for key, l in points.items():
             l["total_bonus"] = bonus_df[bonus_df["Structure"] == key]["Points"].sum()
-    
+
         doc.bonus = {level: 0.50 * l["engagements"] / l["total_bonus"] if l["total_bonus"] else 0
                      for level, l in points.items()}
         for level, value in doc.bonus.items():
             logging.info("Valeur du point bonus pour {}: {:.2f} € (Total engagements: {}, total bonus: {})"
                          .format(level, value, points[level]["engagements"], points[level]["total_bonus"]))
-      
+
         officiels_df = []
         for club in sorted(conf.clubs.values(), key=lambda x: "{} {}".format(x.departement, x.nom)):
             for officiel, reunions in club.officiels.items():
@@ -1028,10 +1027,10 @@ if __name__ == "__main__":
                                          "Réunion": reunion.index,
                                          "Poste": poste,
                                          "Niveau": str(officiel.niveau)})
-    
+
         officiels_df = pd.DataFrame(officiels_df)
         officiels_df.to_excel(writer, sheet_name="Officiels")
-    
+
         raw_df.to_excel(writer, sheet_name="Données brutes")
         writer.save()
 
@@ -1042,5 +1041,5 @@ if __name__ == "__main__":
     for competition in sorted(competitions, key=lambda x: x.startdate):
         if competition.competition_link is None:
             doc.new_competition(competition)
-    
+
     doc.build()
