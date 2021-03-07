@@ -137,10 +137,10 @@ class Officiel:
             self.poste = poste
         else:
             if self.poste.preferred_to(poste):
-                logging.info("Pour {}, le poste {} est préféré à {}".format(str(self), str(self.poste), str(poste)))
+                logging.debug("Pour {}, le poste {} est préféré à {}".format(str(self), str(self.poste), str(poste)))
                 return
             else:
-                logging.info("Pour {}, le poste {} est préféré à {}".format(str(self), str(poste), str(self.poste)))
+                logging.debug("Pour {}, le poste {} est préféré à {}".format(str(self), str(poste), str(self.poste)))
                 self.poste = poste
 
         if self.niveau < poste.niveau:
@@ -188,6 +188,7 @@ class Configuration:
         self.reunions = []
         self.filename = filename
         self.grille = {}
+        self.eleves = {}
 
         logging.info("Lecture du fichier de configuration")
 
@@ -204,6 +205,8 @@ class Configuration:
                 self.niveau_c = self.niveaux[index]
             if row["Niveau"] == "B":
                 self.niveau_b = self.niveaux[index]
+            if row["Niveau"] == "Elève Chrono":
+                self.niveau_c_next = self.niveaux[index]
 
         for index, row in self.read_sheet("Postes", ["Poste", "Niveau", "Départemental", "Régional"], 0).iterrows():
             niveau = min(self.niveaux.values())
@@ -243,6 +246,12 @@ class Configuration:
             club = self.clubs[int(row["Club"])]
             self.club_override[index] = {"Club": club, "Nom": row["Nom"], "Prénom": row["Prénom"]}
             logging.warning("Club {} forcé pour {} {} ({})".format(club.nom, index, row["Prénom"], row["Nom"]))
+
+        for index, row in self.read_sheet("Elèves", ["Nom", "Prénom", "Chrono"], 0).iterrows():
+            if index is not None and not np.isnan(index):
+                if not row["Chrono"] is pd.NaT:
+                    self.eleves[int(index)] = {"Nom": row["Nom"], "Prénom": row["Prénom"], 
+                                               "Chrono": row["Chrono"].to_pydatetime()}
 
         nages = ["Nage Libre", "Dos", "Brasse", "Papillon", "4 Nages"]
         for index, row in self.read_sheet("Nages", ["Nage"], 0).iterrows():
@@ -308,7 +317,7 @@ class Configuration:
                 else:
                     logging.fatal("Impossible de comprendre {} dans la page Grilles".format(key))
 
-        r = re.compile("DSQr(\d+)")
+        r = re.compile(r"DSQr(\d+)")
         for index, row in self.read_sheet("Disqualifications", ["Code", "Libellé"], 0).iterrows():
             code = row["Code"]
             m = r.match(code)
@@ -382,8 +391,8 @@ class Competition:
         if e.tag != "FFNEX":
             raise OfficielException("Le fichier {} n'est pas compatible: FFNEX attendu, {} trouvé"
                                     .format(self.filename, e.tag))
-        if e.attrib["version"] != "1.1.0":
-            logging.warning("Le fichier {} utilise la version {} alors que le script attend la version 1.1.0"
+        if e.attrib["version"] != "1.1.1":
+            logging.warning("Le fichier {} utilise la version {} alors que le script attend la version 1.1.1"
                             .format(self.filename, e.attrib["version"]))
 
         # Competition
@@ -438,7 +447,10 @@ class Competition:
                     logging.warning("Club {} forcé pour {} {} ({})".format(club.nom, prenom, nom, index))
             else:
                 club = self.conf.clubs.get(clubid, None)
-            niveau = self.conf.niveaux.get(gradeid, None)
+            try:
+                niveau = self.conf.niveaux[gradeid]
+            except KeyError:
+                logging.fatal(f"Le niveau {gradeid} pour l'officiel {prenom} {nom} n'est pas listé dans le fichier de configuration")
             if club is not None and club.departement != '99':
                 officiels[index] = Officiel(index=index, nom=o.attrib["lastname"], prenom=o.attrib["firstname"],
                                             club=club, niveau=niveau, niveau_c=conf.niveau_c)
@@ -506,21 +518,30 @@ class Competition:
 
             if race_found:
                 self.reunions.append(reunion)
+                reunion_start = datetime.datetime.strptime(session.attrib["datetime"], "%Y-%m-%d %H:%M:%S")
                 for judge in session.find("JUDGES").findall("JUDGE"):
                     officielid, roleid = int(judge.attrib["officialid"]), int(judge.attrib["roleid"])
                     poste = conf.postes.get(roleid, None)
                     officiel = officiels.get(officielid, None)
+
                     if poste is None:
                         logging.error("Officiel {}: poste {} non trouvé".format(str(officiel), roleid))
                     if officiel is None:
                         logging.warning("Officiel ID {} (role {}) non trouvé".format(officielid, roleid))
                     else:
                         logging.debug("{}: {}".format(str(officiel), str(poste)))
+                        officiel = copy.copy(officiel)
+
+                        if officiel.niveau < self.conf.niveau_c and officiel.index in self.conf.eleves:
+                            eleve = self.conf.eleves[officiel.index]
+                            if eleve["Chrono"] < reunion_start:
+                                logging.info(f"Officiel {officiel.prenom} {officiel.nom} passé en élève chrono")
+                                officiel.niveau = self.conf.niveau_c_next
+                                officiel.real_officiel = True
 
                         if officielid in reunion.officiels:
                             reunion.officiels[officielid].set_poste(poste, reunion)
                         else:
-                            officiel = copy.copy(officiel)
                             officiel.set_poste(poste, reunion)
                             reunion.officiels[officielid] = officiel
 
